@@ -1,0 +1,146 @@
+services:
+  # ============================================================================
+  # 1. CLICKHOUSE ANALYTICS DATABASE (OPTIONAL LOCAL CONTAINER)
+  # Activated with: docker compose --profile local-clickhouse up -d
+  # By default, stack connects to external host specified in .env
+  # ============================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: timechamp_clickhouse
+    profiles: ["local-clickhouse"]
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-COMMAND_CENTER}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_secret}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123" # HTTP API
+      - "9000:9000" # Native TCP client protocol
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - timechamp_network
+
+  # ============================================================================
+  # 2. REDIS (CELERY BROKER, CACHE & LIGHTWEIGHT EVENT STREAMING)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: timechamp_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT_HOST:-6380}:6379"
+
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - timechamp_network
+
+  # ============================================================================
+  # 3. FASTAPI WEB API
+  # ============================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: timechamp_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend/app:/app/app
+      - ./scripts:/app/scripts
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - timechamp_network
+
+  # ============================================================================
+  # 4. CELERY WORKER
+  # ============================================================================
+  celery_worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: timechamp_celery_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backend/app:/app/app
+      - ./scripts:/app/scripts
+    command: ["/app/scripts/start_worker.sh"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - timechamp_network
+
+  # ============================================================================
+  # 5. CELERY BEAT (PERIODIC SCHEDULER)
+  # ============================================================================
+  celery_beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: timechamp_celery_beat
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backend/app:/app/app
+      - ./scripts:/app/scripts
+    command: ["/app/scripts/start_beat.sh"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - timechamp_network
+
+  # ============================================================================
+  # 6. LIGHTWEIGHT EVENT STREAM CONSUMER
+  # ============================================================================
+  stream_consumer:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: timechamp_stream_consumer
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backend/app:/app/app
+      - ./scripts:/app/scripts
+    command: ["/app/scripts/start_consumer.sh"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - timechamp_network
+
+networks:
+  timechamp_network:
+    name: timechamp_production_timechamp_network
+    driver: bridge
+
+volumes:
+  clickhouse_data:
+    name: timechamp_production_clickhouse_data
+  redis_data:
+    name: timechamp_production_redis_data
