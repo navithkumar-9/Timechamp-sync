@@ -64,7 +64,21 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./scripts:/app/scripts
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/v1/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1024M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       redis:
         condition: service_healthy
@@ -86,6 +100,14 @@ services:
       - ./backend/app:/app/app
       - ./scripts:/app/scripts
     command: ["/app/scripts/start_worker.sh"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1024M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       redis:
         condition: service_healthy
@@ -107,6 +129,11 @@ services:
       - ./backend/app:/app/app
       - ./scripts:/app/scripts
     command: ["/app/scripts/start_beat.sh"]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     depends_on:
       redis:
         condition: service_healthy
@@ -128,6 +155,11 @@ services:
       - ./backend/app:/app/app
       - ./scripts:/app/scripts
     command: ["/app/scripts/start_consumer.sh"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
     depends_on:
       redis:
         condition: service_healthy
