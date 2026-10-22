@@ -10,51 +10,55 @@ from app.integrations.timechamp.models import (
     TrackingSummaryRecord,
 )
 
-TRACKING_SUMMARY_COLUMNS = [
+TIMECHAMP_LEGACY_COLUMNS = [
+    "Employee Id",
+    "Employee Name",
+    "Date",
+    "Productive Hours",
+    "Neutral Time",
+    "In Time",
+    "Out Time",
+    "Attendance",
+    "Shift",
+    "Email",
+    "Role",
+    "Contact Number",
+    "Timezone",
+    "Desktop",
+    "Department",
+    "Branch",
+    "Report Head",
+    "Total Time",
+    "Working Hours",
+    "Unproductive Time",
+    "Idle Time",
+    "Online Hours",
+    "Away Time",
+    "Productive Time(+Idle)",
+    "Unproductive Time(+Idle)",
+    "Neutral Time(+Idle)",
+    "Report Head EmailId",
+    "Total Time With Percentage",
+    "Working Hours Percentage",
+    "Productive Hours Percentage",
+    "Unproductive Time With Percentage",
+    "Neutral Time With Percentage",
+    "Idle Time With Percentage",
+    "Time Spent on Work Items",
+    "Offline Time",
+]
+
+TRACKING_SUMMARY_COLUMNS = TIMECHAMP_LEGACY_COLUMNS + [
     "id",
-    "emp_id",
-    "username",
-    "name",
-    "department_name",
-    "reporting_head_name",
     "timesheet_date",
-    "timesheet_date_raw",
-    "start_date_time",
-    "start_date_time_raw",
-    "finish_date_time",
-    "finish_date_time_raw",
-    "total_time",
-    "working_time",
-    "productive_time",
-    "idle_time",
-    "unproductive_time",
-    "neutral_time",
-    "idle_time_spent_on_productive_applications",
-    "idle_time_spent_on_unproductive_applications",
-    "idle_time_spent_on_neutral_applications",
-    "total_productive_time",
-    "total_unproductive_time",
-    "total_neutral_time",
-    "total_activity_count",
-    "productive_activity_count",
-    "unproductive_activity_count",
-    "neutral_activity_count",
-    "productive_percentage",
-    "working_percentage",
+    "total_time_seconds",
+    "working_time_seconds",
+    "productive_time_seconds",
+    "idle_time_seconds",
+    "unproductive_time_seconds",
+    "neutral_time_seconds",
     "fetched_at",
     "updated_at",
-    "total_hours",
-    "working_hours",
-    "productive_hours",
-    "idle_hours",
-    "unproductive_hours",
-    "neutral_hours",
-    "idle_hours_spent_on_productive_applications",
-    "idle_hours_spent_on_unproductive_applications",
-    "idle_hours_spent_on_neutral_applications",
-    "total_productive_hours",
-    "total_unproductive_hours",
-    "total_neutral_hours",
 ]
 
 SYNC_HISTORY_COLUMNS = [
@@ -80,60 +84,80 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
         if not records:
             return 0
 
-        rows = []
+        legacy_rows = []
+        summary_rows = []
         for r in records:
-            rows.append([
-                str(r.id),
-                r.emp_id,
-                r.username,
-                r.name,
-                r.department_name,
-                r.reporting_head_name,
-                r.timesheet_date,
-                r.timesheet_date_raw,
-                r.start_date_time,
-                r.start_date_time_raw,
-                r.finish_date_time,
-                r.finish_date_time_raw,
-                r.total_time,
-                r.working_time,
-                r.productive_time,
-                r.idle_time,
-                r.unproductive_time,
+            leg_row = [
+                r.employee_id,
+                r.employee_name,
+                r.date_str,
+                r.productive_hours,
                 r.neutral_time,
-                r.idle_time_spent_on_productive_applications,
-                r.idle_time_spent_on_unproductive_applications,
-                r.idle_time_spent_on_neutral_applications,
-                r.total_productive_time,
-                r.total_unproductive_time,
-                r.total_neutral_time,
-                r.total_activity_count,
-                r.productive_activity_count,
-                r.unproductive_activity_count,
-                r.neutral_activity_count,
-                float(r.productive_percentage),
-                float(r.working_percentage),
+                r.in_time,
+                r.out_time,
+                r.attendance,
+                r.shift,
+                r.email,
+                r.role,
+                r.contact_number,
+                r.timezone,
+                r.desktop,
+                r.department,
+                r.branch,
+                r.report_head,
+                r.total_time,
+                r.working_hours,
+                r.unproductive_time,
+                r.idle_time,
+                r.online_hours,
+                r.away_time,
+                r.productive_time_plus_idle,
+                r.unproductive_time_plus_idle,
+                r.neutral_time_plus_idle,
+                r.report_head_email_id,
+                r.total_time_with_percentage,
+                r.working_hours_percentage,
+                r.productive_hours_percentage,
+                r.unproductive_time_with_percentage,
+                r.neutral_time_with_percentage,
+                r.idle_time_with_percentage,
+                r.time_spent_on_work_items,
+                r.offline_time,
+            ]
+            legacy_rows.append(leg_row)
+            summary_rows.append(leg_row + [
+                str(r.id),
+                r.timesheet_date,
+                r.total_time_seconds,
+                r.working_time_seconds,
+                r.productive_time_seconds,
+                r.idle_time_seconds,
+                r.unproductive_time_seconds,
+                r.neutral_time_seconds,
                 r.fetched_at,
                 r.updated_at,
-                float(r.total_hours),
-                float(r.working_hours),
-                float(r.productive_hours),
-                float(r.idle_hours),
-                float(r.unproductive_hours),
-                float(r.neutral_hours),
-                float(r.idle_hours_spent_on_productive_applications),
-                float(r.idle_hours_spent_on_unproductive_applications),
-                float(r.idle_hours_spent_on_neutral_applications),
-                float(r.total_productive_hours),
-                float(r.total_unproductive_hours),
-                float(r.total_neutral_hours),
             ])
 
-        table_name = f"{settings.CLICKHOUSE_DB}.timechamp_tracking_summary"
-        logger.info(f"Persisting batch of {len(rows)} records into {table_name}...")
-        await self.ch.insert(table="timechamp_tracking_summary", data=rows, column_names=TRACKING_SUMMARY_COLUMNS)
-        logger.info(f"✓ Successfully inserted {len(rows)} tracking summary rows into ClickHouse.")
-        return len(rows)
+        # 1. Persist into COMMAND_CENTER.timechamp_tracking_summary
+        summary_table = f"{settings.CLICKHOUSE_DB}.timechamp_tracking_summary"
+        logger.info(f"Persisting batch of {len(summary_rows)} records into {summary_table}...")
+        await self.ch.insert(table="timechamp_tracking_summary", data=summary_rows, column_names=TRACKING_SUMMARY_COLUMNS)
+
+        # 2. Persist into legacy COMMAND_CENTER.TimeChamp with duplicate cleanup by date
+        legacy_table = f"{settings.CLICKHOUSE_DB}.TimeChamp"
+        try:
+            dates = list({r.date_str for r in records if r.date_str})
+            if dates:
+                date_filter = ", ".join([f"'{d}'" for d in dates])
+                await self.ch.command(f"ALTER TABLE {legacy_table} DELETE WHERE Date IN ({date_filter})")
+            logger.info(f"Persisting batch of {len(legacy_rows)} records into {legacy_table}...")
+            await self.ch.insert(table="TimeChamp", data=legacy_rows, column_names=TIMECHAMP_LEGACY_COLUMNS)
+            logger.info(f"✓ Successfully synced {len(legacy_rows)} rows into {legacy_table}.")
+        except Exception as leg_err:
+            logger.warning(f"Notice while syncing to {legacy_table}: {leg_err}")
+
+        logger.info(f"✓ Successfully inserted {len(records)} tracking summary rows into ClickHouse.")
+        return len(records)
 
     async def save_sync_history(self, log: SyncHistoryRecord) -> None:
         row = [[
@@ -155,9 +179,9 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
     async def query_tracking_summary(self, filters: TrackingSummaryFilter) -> List[Dict[str, Any]]:
         conditions = []
         if filters.emp_id:
-            conditions.append(f"emp_id = '{filters.emp_id}'")
+            conditions.append(f"`Employee Id` = '{filters.emp_id}'")
         if filters.department_name:
-            conditions.append(f"department_name = '{filters.department_name}'")
+            conditions.append(f"Department = '{filters.department_name}'")
         if filters.start_date:
             conditions.append(f"timesheet_date >= '{filters.start_date.isoformat()}'")
         if filters.end_date:
@@ -167,33 +191,27 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
         query = f"""
             SELECT
                 id,
-                emp_id,
-                username,
-                name,
-                department_name,
-                reporting_head_name,
+                `Employee Id` AS emp_id,
+                Email AS username,
+                `Employee Name` AS name,
+                Department AS department_name,
+                `Report Head` AS reporting_head_name,
                 timesheet_date,
-                timesheet_date_raw,
-                start_date_time,
-                finish_date_time,
-                total_time,
-                total_hours,
-                working_time,
-                working_hours,
-                productive_time,
-                productive_hours,
-                idle_time,
-                idle_hours,
-                unproductive_time,
-                unproductive_hours,
-                neutral_time,
-                neutral_hours,
-                productive_percentage,
-                working_percentage,
+                Date AS timesheet_date_raw,
+                `In Time` AS in_time,
+                `Out Time` AS out_time,
+                `Total Time` AS total_time,
+                `Working Hours` AS working_hours,
+                `Productive Hours` AS productive_hours,
+                `Idle Time` AS idle_time,
+                `Unproductive Time` AS unproductive_time,
+                `Neutral Time` AS neutral_time,
+                `Productive Hours Percentage` AS productive_percentage,
+                `Working Hours Percentage` AS working_percentage,
                 updated_at
             FROM {settings.CLICKHOUSE_DB}.timechamp_tracking_summary
             {where_clause}
-            ORDER BY timesheet_date DESC, department_name ASC, emp_id ASC
+            ORDER BY timesheet_date DESC, Department ASC, `Employee Id` ASC
             LIMIT {filters.limit} OFFSET {filters.offset}
         """
         return await self.ch.query(query)

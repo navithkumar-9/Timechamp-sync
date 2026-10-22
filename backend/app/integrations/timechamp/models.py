@@ -5,60 +5,85 @@ from pydantic import BaseModel, Field
 
 
 class TrackingSummaryRecord(BaseModel):
-    """Domain model representing a normalized Timechamp tracking summary record in ClickHouse."""
+    """Domain model representing a normalized Timechamp tracking summary record in ClickHouse.
+    
+    Contains all 35 legacy columns matching COMMAND_CENTER.TimeChamp schema exactly,
+    plus typed fields for high-performance indexing and aggregation.
+    """
+    # 35 Legacy TimeChamp columns
+    employee_id: str = Field(..., alias="Employee Id", description="Employee ID foreign key")
+    employee_name: str = Field(default="", alias="Employee Name", description="Employee display name")
+    date_str: str = Field(..., alias="Date", description="Formatted timesheet date (%b-%d-%Y)")
+    productive_hours: str = Field(default="00:00:00", alias="Productive Hours", description="Productive hours (HH:MM:SS)")
+    neutral_time: str = Field(default="00:00:00", alias="Neutral Time", description="Neutral time (HH:MM:SS)")
+    in_time: Optional[str] = Field(None, alias="In Time", description="Clock-in time (HH:MM)")
+    out_time: Optional[str] = Field(None, alias="Out Time", description="Clock-out time (HH:MM)")
+    attendance: str = Field(default="Absent", alias="Attendance", description="Attendance status")
+    shift: str = Field(default="08:00 IST - 19:30 IST", alias="Shift", description="Shift schedule")
+    email: str = Field(default="", alias="Email", description="Employee corporate email")
+    role: str = Field(default="User", alias="Role", description="User role")
+    contact_number: Optional[str] = Field(None, alias="Contact Number", description="Contact phone")
+    timezone: Optional[str] = Field(None, alias="Timezone", description="User timezone")
+    desktop: Optional[str] = Field(None, alias="Desktop", description="Workstation name")
+    department: str = Field(default="Unassigned", alias="Department", description="Department name")
+    branch: str = Field(default="AUTOSherpa Systems", alias="Branch", description="Branch location")
+    report_head: str = Field(default="", alias="Report Head", description="Supervisor name(s)")
+    total_time: str = Field(default="00:00:00", alias="Total Time", description="Total elapsed time (HH:MM:SS)")
+    working_hours: str = Field(default="00:00:00", alias="Working Hours", description="Working time (HH:MM:SS)")
+    unproductive_time: str = Field(default="00:00:00", alias="Unproductive Time", description="Unproductive time (HH:MM:SS)")
+    idle_time: str = Field(default="00:00:00", alias="Idle Time", description="Idle time (HH:MM:SS)")
+    online_hours: str = Field(default="00:00:00", alias="Online Hours", description="Online time (HH:MM:SS)")
+    away_time: str = Field(default="00:00:00", alias="Away Time", description="Away time (HH:MM:SS)")
+    productive_time_plus_idle: str = Field(default="00:00:00", alias="Productive Time(+Idle)")
+    unproductive_time_plus_idle: str = Field(default="00:00:00", alias="Unproductive Time(+Idle)")
+    neutral_time_plus_idle: str = Field(default="00:00:00", alias="Neutral Time(+Idle)")
+    report_head_email_id: str = Field(default="", alias="Report Head EmailId")
+    total_time_with_percentage: str = Field(default="0%", alias="Total Time With Percentage")
+    working_hours_percentage: str = Field(default="0%", alias="Working Hours Percentage")
+    productive_hours_percentage: str = Field(default="0%", alias="Productive Hours Percentage")
+    unproductive_time_with_percentage: str = Field(default="0%", alias="Unproductive Time With Percentage")
+    neutral_time_with_percentage: str = Field(default="0%", alias="Neutral Time With Percentage")
+    idle_time_with_percentage: str = Field(default="0%", alias="Idle Time With Percentage")
+    time_spent_on_work_items: str = Field(default="00:00:00", alias="Time Spent on Work Items")
+    offline_time: str = Field(default="00:00:00", alias="Offline Time")
+
+    # Technical & analytics columns
     id: UUID = Field(default_factory=uuid4)
-    emp_id: str = Field(..., description="Employee ID foreign key")
-    username: str = Field(default="", description="Employee corporate email/login")
-    name: str = Field(default="", description="Employee display name")
-    department_name: str = Field(default="Unassigned", description="Department")
-    reporting_head_name: str = Field(default="", description="Supervisor names")
-
     timesheet_date: date = Field(..., description="Normalized date (YYYY-MM-DD)")
-    timesheet_date_raw: str = Field(default="", description="Original date string from API")
-
-    start_date_time: Optional[datetime] = Field(None, description="Normalized clock-in timestamp")
-    start_date_time_raw: str = Field(default="", description="Raw clock-in string")
-
-    finish_date_time: Optional[datetime] = Field(None, description="Normalized clock-out timestamp")
-    finish_date_time_raw: str = Field(default="", description="Raw clock-out string")
-
-    total_time: int = Field(default=0, description="Total elapsed seconds")
-    total_hours: float = Field(default=0.0, description="Total elapsed hours")
-    working_time: int = Field(default=0, description="Active working seconds")
-    working_hours: float = Field(default=0.0, description="Active working hours")
-    productive_time: int = Field(default=0, description="Productive seconds")
-    productive_hours: float = Field(default=0.0, description="Productive hours")
-    idle_time: int = Field(default=0, description="Idle seconds")
-    idle_hours: float = Field(default=0.0, description="Idle hours")
-    unproductive_time: int = Field(default=0, description="Unproductive seconds")
-    unproductive_hours: float = Field(default=0.0, description="Unproductive hours")
-    neutral_time: int = Field(default=0, description="Neutral seconds")
-    neutral_hours: float = Field(default=0.0, description="Neutral hours")
-
-    idle_time_spent_on_productive_applications: int = 0
-    idle_hours_spent_on_productive_applications: float = 0.0
-    idle_time_spent_on_unproductive_applications: int = 0
-    idle_hours_spent_on_unproductive_applications: float = 0.0
-    idle_time_spent_on_neutral_applications: int = 0
-    idle_hours_spent_on_neutral_applications: float = 0.0
-
-    total_productive_time: int = 0
-    total_productive_hours: float = 0.0
-    total_unproductive_time: int = 0
-    total_unproductive_hours: float = 0.0
-    total_neutral_time: int = 0
-    total_neutral_hours: float = 0.0
-
-    total_activity_count: int = 0
-    productive_activity_count: int = 0
-    unproductive_activity_count: int = 0
-    neutral_activity_count: int = 0
-
-    productive_percentage: float = Field(default=0.0, description="Productive % of total time")
-    working_percentage: float = Field(default=0.0, description="Working % of total time")
-
+    total_time_seconds: int = 0
+    working_time_seconds: int = 0
+    productive_time_seconds: int = 0
+    idle_time_seconds: int = 0
+    unproductive_time_seconds: int = 0
+    neutral_time_seconds: int = 0
     fetched_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = {
+        "populate_by_name": True,
+        "extra": "ignore",
+    }
+
+    # Backward compatibility properties
+    @property
+    def emp_id(self) -> str:
+        return self.employee_id
+
+    @property
+    def name(self) -> str:
+        return self.employee_name
+
+    @property
+    def username(self) -> str:
+        return self.email
+
+    @property
+    def department_name(self) -> str:
+        return self.department
+
+    @property
+    def reporting_head_name(self) -> str:
+        return self.report_head
 
 
 class SyncHistoryRecord(BaseModel):

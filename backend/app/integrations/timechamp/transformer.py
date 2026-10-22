@@ -54,16 +54,78 @@ class TrackingDataTransformer(ITrackingDataTransformer):
 
         return None
 
+    def _format_date_b_d_Y(self, d: date) -> str:
+        """Format date as '%b-%d-%Y' (e.g., 'Oct-22-2026') required by downstream ClickHouse views."""
+        return d.strftime("%b-%d-%Y")
+
+    def _seconds_to_hms(self, seconds: int) -> str:
+        """Convert integer seconds into 'HH:MM:SS' string format."""
+        sec = max(0, int(seconds or 0))
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _extract_time_hh_mm(self, raw_str: Optional[str]) -> str:
+        """Extract 'HH:MM' clock time from timestamp string."""
+        if not raw_str:
+            return ""
+        parts = raw_str.strip().split()
+        if len(parts) >= 2:
+            time_part = parts[1]
+            t_parts = time_part.split(":")
+            if len(t_parts) >= 2:
+                try:
+                    hh = int(t_parts[0])
+                    mm = int(t_parts[1])
+                    return f"{hh:02d}:{mm:02d}"
+                except ValueError:
+                    pass
+        return ""
+
+    def _normalize_out_time_24h(self, in_time: str, out_raw: Optional[str]) -> str:
+        """Ensure out time is in 24-hour 'HH:MM' format, resolving 12-hour PM rollovers."""
+        out_t = self._extract_time_hh_mm(out_raw)
+        if not out_t or not in_time:
+            return out_t
+        try:
+            in_hh, in_mm = [int(x) for x in in_time.split(":")]
+            out_hh, out_mm = [int(x) for x in out_t.split(":")]
+            if in_hh > out_hh and out_hh < 12:
+                out_hh += 12
+            return f"{out_hh:02d}:{out_mm:02d}"
+        except Exception:
+            return out_t
+
+    def _compute_attendance(self, work_sec: int, prod_sec: int) -> str:
+        """Derive standard attendance status (Full day, Half day, Absent)."""
+        ref_sec = max(work_sec, prod_sec)
+        if ref_sec >= 27900:  # ~7h 45m / 8h
+            return "Full day"
+        elif ref_sec >= 14400:  # 4h
+            return "Half day"
+        elif ref_sec > 0:
+            return "Half day"
+        return "Absent"
+
+    def _compute_pct_str(self, val: int, base: int) -> str:
+        """Format percentage string (e.g., '92%')."""
+        if base <= 0:
+            return "0%"
+        pct = round((val / base) * 100)
+        return f"{pct}%"
+
     def transform_record(self, raw: Dict[str, Any]) -> TrackingSummaryRecord:
-        """Converts raw JSON dictionary from Timechamp API into a strongly-typed TrackingSummaryRecord."""
+        """Converts raw JSON dictionary from Timechamp API into a strongly-typed TrackingSummaryRecord with all 35 legacy columns."""
         raw_timesheet_date = str(raw.get("timesheetDate") or "")
         parsed_date = self._parse_timesheet_date(raw_timesheet_date)
+        formatted_date = self._format_date_b_d_Y(parsed_date)
 
         raw_start = str(raw.get("startDateTime") or "")
-        parsed_start = self._parse_datetime(raw_start)
+        in_time = self._extract_time_hh_mm(raw_start) if raw_start else None
 
         raw_finish = str(raw.get("finishDateTime") or "")
-        parsed_finish = self._parse_datetime(raw_finish)
+        out_time = self._normalize_out_time_24h(in_time or "", raw_finish) if raw_finish else None
 
         total_time = max(0, int(raw.get("totalTime") or 0))
         working_time = max(0, int(raw.get("workingTime") or 0))
@@ -76,61 +138,81 @@ class TrackingDataTransformer(ITrackingDataTransformer):
         idle_unproductive = max(0, int(raw.get("idleTimeSpentOnUnroductiveApplications") or 0))
         idle_neutral = max(0, int(raw.get("idleTimeSpentOnNeutralApplications") or 0))
 
-        tot_productive = max(0, int(raw.get("totalProductiveTime") or 0))
-        tot_unproductive = max(0, int(raw.get("totalUnProductiveTime") or 0))
-        tot_neutral = max(0, int(raw.get("totalNeutralTime") or 0))
+        away_time = max(0, total_time - working_time)
+        online_time = max(0, working_time + idle_time)
+        offline_time = max(0, total_time - online_time)
 
-        def _to_hours(sec: int) -> float:
-            return round(sec / 3600.0, 2)
+        prod_plus_idle = productive_time + idle_productive
+        unprod_plus_idle = unproductive_time + idle_unproductive
+        neut_plus_idle = neutral_time + idle_neutral
 
-        productive_pct = round((productive_time / total_time) * 100.0, 2) if total_time > 0 else 0.0
-        working_pct = round((working_time / total_time) * 100.0, 2) if total_time > 0 else 0.0
+        attendance = self._compute_attendance(working_time, productive_time)
+
+        # Standard 9-hour workday baseline (32400 seconds)
+        total_time_pct = self._compute_pct_str(total_time, 32400)
+        working_hours_pct = self._compute_pct_str(working_time, 32400)
+        prod_hours_pct = self._compute_pct_str(productive_time, working_time or 1)
+        unprod_pct = self._compute_pct_str(unproductive_time, working_time or 1)
+        neut_pct = self._compute_pct_str(neutral_time, working_time or 1)
+        idle_pct = self._compute_pct_str(idle_time, total_time or 1)
+
+        emp_id = str(raw.get("empID") or "UNKNOWN").strip()
+        emp_name = str(raw.get("name") or "").strip()
+        email = str(raw.get("username") or "").strip()
+        dept = str(raw.get("departmentName") or "Unassigned").strip()
+        rep_head = str(raw.get("reportingHeadName") or "").strip()
+        rep_email = str(raw.get("reportingHeadEmailId") or raw.get("reportingHeadEmail") or "").strip()
 
         return TrackingSummaryRecord(
-            id=uuid4(),
-            emp_id=str(raw.get("empID") or "UNKNOWN").strip(),
-            username=str(raw.get("username") or "").strip(),
-            name=str(raw.get("name") or "").strip(),
-            department_name=str(raw.get("departmentName") or "Unassigned").strip(),
-            reporting_head_name=str(raw.get("reportingHeadName") or "").strip(),
-            timesheet_date=parsed_date,
-            timesheet_date_raw=raw_timesheet_date,
-            start_date_time=parsed_start,
-            start_date_time_raw=raw_start,
-            finish_date_time=parsed_finish,
-            finish_date_time_raw=raw_finish,
-            total_time=total_time,
-            total_hours=_to_hours(total_time),
-            working_time=working_time,
-            working_hours=_to_hours(working_time),
-            productive_time=productive_time,
-            productive_hours=_to_hours(productive_time),
-            idle_time=idle_time,
-            idle_hours=_to_hours(idle_time),
-            unproductive_time=unproductive_time,
-            unproductive_hours=_to_hours(unproductive_time),
-            neutral_time=neutral_time,
-            neutral_hours=_to_hours(neutral_time),
-            idle_time_spent_on_productive_applications=idle_productive,
-            idle_hours_spent_on_productive_applications=_to_hours(idle_productive),
-            idle_time_spent_on_unproductive_applications=idle_unproductive,
-            idle_hours_spent_on_unproductive_applications=_to_hours(idle_unproductive),
-            idle_time_spent_on_neutral_applications=idle_neutral,
-            idle_hours_spent_on_neutral_applications=_to_hours(idle_neutral),
-            total_productive_time=tot_productive,
-            total_productive_hours=_to_hours(tot_productive),
-            total_unproductive_time=tot_unproductive,
-            total_unproductive_hours=_to_hours(tot_unproductive),
-            total_neutral_time=tot_neutral,
-            total_neutral_hours=_to_hours(tot_neutral),
-            total_activity_count=max(0, int(raw.get("totalActivityCount") or 0)),
-            productive_activity_count=max(0, int(raw.get("productiveActivityCount") or 0)),
-            unproductive_activity_count=max(0, int(raw.get("unproductiveActivityCount") or 0)),
-            neutral_activity_count=max(0, int(raw.get("neutralActivityCount") or 0)),
-            productive_percentage=productive_pct,
-            working_percentage=working_pct,
-            fetched_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            # 35 Legacy columns matching COMMAND_CENTER.TimeChamp exactly
+            **{
+                "Employee Id": emp_id,
+                "Employee Name": emp_name,
+                "Date": formatted_date,
+                "Productive Hours": self._seconds_to_hms(productive_time),
+                "Neutral Time": self._seconds_to_hms(neutral_time),
+                "In Time": in_time,
+                "Out Time": out_time,
+                "Attendance": attendance,
+                "Shift": str(raw.get("shift") or "08:00 IST - 19:30 IST").strip(),
+                "Email": email,
+                "Role": str(raw.get("role") or "User").strip(),
+                "Contact Number": raw.get("contactNumber") or raw.get("phoneNumber"),
+                "Timezone": raw.get("timezone"),
+                "Desktop": raw.get("desktop") or raw.get("desktopName"),
+                "Department": dept,
+                "Branch": str(raw.get("branch") or "AUTOSherpa Systems").strip(),
+                "Report Head": rep_head,
+                "Total Time": self._seconds_to_hms(total_time),
+                "Working Hours": self._seconds_to_hms(working_time),
+                "Unproductive Time": self._seconds_to_hms(unproductive_time),
+                "Idle Time": self._seconds_to_hms(idle_time),
+                "Online Hours": self._seconds_to_hms(online_time),
+                "Away Time": self._seconds_to_hms(away_time),
+                "Productive Time(+Idle)": self._seconds_to_hms(prod_plus_idle),
+                "Unproductive Time(+Idle)": self._seconds_to_hms(unprod_plus_idle),
+                "Neutral Time(+Idle)": self._seconds_to_hms(neut_plus_idle),
+                "Report Head EmailId": rep_email,
+                "Total Time With Percentage": total_time_pct,
+                "Working Hours Percentage": working_hours_pct,
+                "Productive Hours Percentage": prod_hours_pct,
+                "Unproductive Time With Percentage": unprod_pct,
+                "Neutral Time With Percentage": neut_pct,
+                "Idle Time With Percentage": idle_pct,
+                "Time Spent on Work Items": "00:00:00",
+                "Offline Time": self._seconds_to_hms(offline_time),
+                # Additional analytics fields
+                "id": uuid4(),
+                "timesheet_date": parsed_date,
+                "total_time_seconds": total_time,
+                "working_time_seconds": working_time,
+                "productive_time_seconds": productive_time,
+                "idle_time_seconds": idle_time,
+                "unproductive_time_seconds": unproductive_time,
+                "neutral_time_seconds": neutral_time,
+                "fetched_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }
         )
 
     def transform_batch(self, raw_list: List[Dict[str, Any]]) -> List[TrackingSummaryRecord]:
