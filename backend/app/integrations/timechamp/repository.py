@@ -143,20 +143,7 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
         logger.info(f"Persisting batch of {len(summary_rows)} records into {summary_table}...")
         await self.ch.insert(table="timechamp_tracking_summary", data=summary_rows, column_names=TRACKING_SUMMARY_COLUMNS)
 
-        # 2. Persist into legacy COMMAND_CENTER.TimeChamp with duplicate cleanup by date
-        legacy_table = f"{settings.CLICKHOUSE_DB}.TimeChamp"
-        try:
-            dates = list({r.date_str for r in records if r.date_str})
-            if dates:
-                date_filter = ", ".join([f"'{d}'" for d in dates])
-                await self.ch.command(f"ALTER TABLE {legacy_table} DELETE WHERE Date IN ({date_filter})")
-            logger.info(f"Persisting batch of {len(legacy_rows)} records into {legacy_table}...")
-            await self.ch.insert(table="TimeChamp", data=legacy_rows, column_names=TIMECHAMP_LEGACY_COLUMNS)
-            logger.info(f"✓ Successfully synced {len(legacy_rows)} rows into {legacy_table}.")
-        except Exception as leg_err:
-            logger.warning(f"Notice while syncing to {legacy_table}: {leg_err}")
-
-        logger.info(f"✓ Successfully inserted {len(records)} tracking summary rows into ClickHouse.")
+        logger.info(f"✓ Successfully inserted {len(records)} tracking summary rows into {summary_table}.")
         return len(records)
 
     async def save_sync_history(self, log: SyncHistoryRecord) -> None:
