@@ -20,6 +20,16 @@ class RedisStreamProducer:
     async def _get_client(self) -> Optional[Any]:
         if aioredis is None:
             return None
+        try:
+            import asyncio
+            current_loop = asyncio.get_running_loop()
+            if self._client is not None:
+                client_loop = getattr(self._client, "_loop", None) or getattr(getattr(self._client, "connection_pool", None), "_loop", None)
+                if client_loop is not None and (client_loop.is_closed() or client_loop != current_loop):
+                    self._client = None
+        except Exception:
+            self._client = None
+
         if self._client is None:
             try:
                 self._client = aioredis.from_url(
@@ -59,7 +69,18 @@ class RedisStreamProducer:
             logger.debug(f"Event published to Redis stream '{target_stream}' [msg_id: {msg_id}]")
             return msg_id
         except Exception as e:
-            logger.warning(f"Failed to publish event to Redis stream '{target_stream}': {e}")
+            # If the connection failed due to event loop change, reset and retry once
+            self._client = None
+            try:
+                retry_client = await self._get_client()
+                if retry_client:
+                    fields = {
+                        "event_type": event_type,
+                        "payload": json.dumps(payload, default=str),
+                    }
+                    return await retry_client.xadd(name=target_stream, fields=fields)
+            except Exception as retry_err:
+                logger.warning(f"Failed to publish event to Redis stream '{target_stream}': {retry_err}")
             return None
 
     async def close(self) -> None:
