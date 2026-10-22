@@ -29,6 +29,21 @@ async def lifespan(app: FastAPI):
     if await stream_producer.is_healthy():
         logger.info("✓ Redis Stream Producer active.")
 
+    # 3. Automatic Downtime Catch-up Sync on Startup
+    async def _startup_catchup():
+        await asyncio.sleep(2) # Brief delay to allow initial server startup to complete
+        try:
+            from app.integrations.timechamp.pipeline import get_sync_pipeline
+            pipe = get_sync_pipeline()
+            logger.info("Checking for any missed dates during server downtime...")
+            result = await pipe.run_sync(sync_type="STARTUP_AUTO_CATCHUP", auto_catchup=True)
+            logger.info(f"✓ Startup auto-catchup finished: {result.records_inserted} rows updated.")
+        except Exception as e:
+            logger.warning(f"Startup catchup notice: {e}")
+
+    import asyncio
+    asyncio.create_task(_startup_catchup())
+
     yield
 
     # Teardown

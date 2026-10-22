@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 from app.core.config import settings
 from app.core.logger import logger
 from app.db.clickhouse import ClickHouseManager, ch_manager
@@ -196,6 +197,21 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
             LIMIT {filters.limit} OFFSET {filters.offset}
         """
         return await self.ch.query(query)
+
+    async def get_latest_synced_date(self) -> Optional[date]:
+        """Fetch the most recent timesheet_date stored in ClickHouse."""
+        query = f"SELECT max(timesheet_date) as max_date FROM {settings.CLICKHOUSE_DB}.timechamp_tracking_summary"
+        try:
+            rows = await self.ch.query(query)
+            if rows and rows[0].get("max_date"):
+                val = rows[0]["max_date"]
+                if isinstance(val, date):
+                    return val
+                elif isinstance(val, str):
+                    return datetime.strptime(val, "%Y-%m-%d").date()
+        except Exception as e:
+            logger.warning(f"Could not retrieve latest timesheet_date from ClickHouse: {e}")
+        return None
 
 
 default_repository = ClickHouseTrackingSummaryRepository()

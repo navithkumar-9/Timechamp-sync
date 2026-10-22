@@ -35,22 +35,42 @@ class TrackingSyncPipeline(ITrackingPipeline):
         sync_type: str = "MANUAL",
         target_date: Optional[str] = None,
         lookback_days: int = 1,
+        auto_catchup: bool = False,
     ) -> SyncResult:
         sync_id = uuid4()
         started_at = datetime.utcnow()
         t0 = time.perf_counter()
 
+        # Determine target dates to synchronize
+        from datetime import date, timedelta
+        today = date.today()
+
+        # Auto-detect server downtime and expand lookback window to catch up missing dates
+        if auto_catchup and not target_date:
+            try:
+                latest_date = await self.repository.get_latest_synced_date()
+                if latest_date:
+                    gap_days = (today - latest_date).days
+                    if gap_days > 1:
+                        # Add 1 extra day lookback for offline hours flush, capped at 30 days
+                        effective_lookback = min(max(lookback_days, gap_days + 1), 30)
+                        logger.info(
+                            f"[{sync_id}] [Auto-Catchup] Server downtime detected: "
+                            f"last synced date in ClickHouse was {latest_date} ({gap_days} days ago). "
+                            f"Automatically backfilling missing dates with lookback={effective_lookback} days."
+                        )
+                        lookback_days = effective_lookback
+            except Exception as catchup_err:
+                logger.warning(f"[{sync_id}] Notice during auto-catchup evaluation: {catchup_err}")
+
         logger.info(f"[{sync_id}] === Starting Timechamp Tracking Sync ({sync_type}, lookback={lookback_days}) ===")
         total_fetched = 0
         total_inserted = 0
 
-        # Determine target dates to synchronize
-        from datetime import date, timedelta
         dates_to_sync: List[Optional[str]] = []
         if target_date:
             dates_to_sync = [target_date]
         elif lookback_days > 0:
-            today = date.today()
             for offset in range(lookback_days + 1):
                 d = today - timedelta(days=offset)
                 dates_to_sync.append(d.strftime("%d-%b-%y"))
@@ -85,7 +105,6 @@ class TrackingSyncPipeline(ITrackingPipeline):
             except Exception as stream_err:
                 logger.debug(f"Stream notification skipped: {stream_err}")
 
-
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
 
             # Record successful sync log in ClickHouse
@@ -112,7 +131,6 @@ class TrackingSyncPipeline(ITrackingPipeline):
                 message=f"Successfully synchronized {total_inserted} records across target dates",
             )
 
-
         except Exception as exc:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             error_msg = str(exc)
@@ -124,8 +142,8 @@ class TrackingSyncPipeline(ITrackingPipeline):
                     sync_id=sync_id,
                     sync_type=sync_type,
                     status="FAILED",
-                    records_fetched=records_fetched,
-                    records_inserted=records_inserted,
+                    records_fetched=total_fetched,
+                    records_inserted=total_inserted,
                     duration_ms=duration_ms,
                     error_message=error_msg,
                     started_at=started_at,
@@ -138,8 +156,8 @@ class TrackingSyncPipeline(ITrackingPipeline):
             return SyncResult(
                 success=False,
                 sync_id=str(sync_id),
-                records_fetched=records_fetched,
-                records_inserted=records_inserted,
+                records_fetched=total_fetched,
+                records_inserted=total_inserted,
                 duration_ms=duration_ms,
                 message="Sync pipeline encountered an error",
                 error=error_msg,

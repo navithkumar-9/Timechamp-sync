@@ -32,6 +32,7 @@ async def trigger_timechamp_sync(
     async_mode: bool = Query(False, description="Run in background via Celery worker if True"),
     target_date: Optional[str] = Query(None, description="Specific date to sync (e.g. '13-Oct-26' or '2026-10-13')"),
     lookback_days: int = Query(1, description="Number of past days to backfill for offline work"),
+    auto_catchup: bool = Query(True, description="Automatically detect and backfill missing dates if server was down"),
     pipeline: ITrackingPipeline = Depends(get_sync_pipeline),
 ):
     """Fetches latest tracking summary data from Timechamp external API and saves it directly to ClickHouse.
@@ -48,6 +49,7 @@ async def trigger_timechamp_sync(
         sync_type="MANUAL_API_TRIGGER",
         target_date=target_date,
         lookback_days=lookback_days,
+        auto_catchup=auto_catchup,
     )
 
     return StandardResponse(

@@ -49,6 +49,6 @@ def sync_timechamp_tracking_data_task(self, sync_type: str = "CELERY_ASYNC") -> 
 
     logger.info(f"[Task {self.request.id}] Running Timechamp data sync...")
     pipeline = get_sync_pipeline()
-    result = asyncio.run(pipeline.run_sync(sync_type=sync_type))
+    result = asyncio.run(pipeline.run_sync(sync_type=sync_type, auto_catchup=True))
     return result.model_dump()
 

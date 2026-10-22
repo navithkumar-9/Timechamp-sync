@@ -33,6 +33,6 @@ def periodic_timechamp_sync():
 
     logger.info("[Celery Beat Scheduled] Executing periodic Timechamp data sync...")
     pipeline = get_sync_pipeline()
-    result = asyncio.run(pipeline.run_sync(sync_type="SCHEDULED_CRON"))
+    result = asyncio.run(pipeline.run_sync(sync_type="SCHEDULED_CRON", auto_catchup=True))
     return result.model_dump()
 

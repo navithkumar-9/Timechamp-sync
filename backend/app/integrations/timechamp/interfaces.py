@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from app.integrations.timechamp.models import (
@@ -75,12 +76,23 @@ class ITrackingSummaryRepository(ABC):
         """Execute analytical query against ClickHouse."""
         pass
 
+    @abstractmethod
+    async def get_latest_synced_date(self) -> Optional[date]:
+        """Fetch the most recent timesheet_date stored in ClickHouse."""
+        pass
+
 
 class ITrackingPipeline(ABC):
     """Interface for coordinating the end-to-end sync workflow (SRP: Orchestration)."""
 
     @abstractmethod
-    async def run_sync(self, sync_type: str = "MANUAL", target_date: Optional[str] = None, lookback_days: int = 0) -> SyncResult:
-        """Execute end-to-end extraction, transformation, and storage with optional lookback window."""
+    async def run_sync(
+        self,
+        sync_type: str = "MANUAL",
+        target_date: Optional[str] = None,
+        lookback_days: int = 1,
+        auto_catchup: bool = False,
+    ) -> SyncResult:
+        """Execute end-to-end extraction, transformation, and storage with optional lookback window and auto-catchup."""
         pass
 
