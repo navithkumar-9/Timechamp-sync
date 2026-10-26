@@ -92,7 +92,10 @@ class ITrackingPipeline(ABC):
         target_date: Optional[str] = None,
         lookback_days: int = 1,
         auto_catchup: bool = False,
+        payroll_cycle: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
     ) -> SyncResult:
-        """Execute end-to-end extraction, transformation, and storage with optional lookback window and auto-catchup."""
+        """Execute end-to-end extraction, transformation, and storage with optional lookback window, auto-catchup, or payroll cycle."""
         pass
 

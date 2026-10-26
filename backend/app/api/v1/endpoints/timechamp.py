@@ -33,6 +33,9 @@ async def trigger_timechamp_sync(
     target_date: Optional[str] = Query(None, description="Specific date to sync (e.g. '13-Oct-26' or '2026-10-13')"),
     lookback_days: int = Query(1, description="Number of past days to backfill for offline work"),
     auto_catchup: bool = Query(True, description="Automatically detect and backfill missing dates if server was down"),
+    payroll_cycle: Optional[str] = Query(None, description="Payroll cycle month to sync, e.g. '2026-10' for 26-Sep to 25-Oct"),
+    start_date: Optional[str] = Query(None, description="Custom start date for date range sync (e.g. '2026-09-26')"),
+    end_date: Optional[str] = Query(None, description="Custom end date for date range sync (e.g. '2026-10-25')"),
     pipeline: ITrackingPipeline = Depends(get_sync_pipeline),
 ):
     """Fetches latest tracking summary data from Timechamp external API and saves it directly to ClickHouse.
@@ -50,6 +53,9 @@ async def trigger_timechamp_sync(
         target_date=target_date,
         lookback_days=lookback_days,
         auto_catchup=auto_catchup,
+        payroll_cycle=payroll_cycle,
+        start_date=start_date,
+        end_date=end_date,
     )
 
     return StandardResponse(

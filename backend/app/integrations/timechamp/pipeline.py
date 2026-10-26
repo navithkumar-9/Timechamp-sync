@@ -1,6 +1,6 @@
 import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 from app.core.logger import logger
 from app.integrations.timechamp.client import get_timechamp_api_client
@@ -15,6 +15,39 @@ from app.integrations.timechamp.repository import get_repository
 from app.integrations.timechamp.transformer import get_transformer
 from app.streams.producer import stream_producer
 
+
+def parse_date_flexible(d_str: str) -> date:
+    """Parse arbitrary date string into Python date."""
+    d_clean = d_str.strip()
+    for fmt in ["%Y-%m-%d", "%d-%b-%y", "%d-%b-%Y", "%b-%d-%Y", "%d/%m/%Y"]:
+        try:
+            return datetime.strptime(d_clean, fmt).date()
+        except ValueError:
+            pass
+    raise ValueError(f"Unsupported date format: {d_str}")
+
+
+def get_payroll_cycle_range(ref_date: Optional[date] = None, cycle_str: Optional[str] = None) -> Tuple[date, date]:
+    """
+    Computes (start_date, end_date) for a payroll cycle.
+    In the company's payroll policy, cycles run from the 26th of the prior month to the 25th of the cycle month.
+    e.g. cycle_str='2026-10' -> 2026-09-26 to 2026-10-25.
+    """
+    if cycle_str:
+        parts = cycle_str.strip().split("-")
+        year, month = int(parts[0]), int(parts[1])
+        end_date = date(year, month, 25)
+        start_date = date(year - 1, 12, 26) if month == 1 else date(year, month - 1, 26)
+        return start_date, end_date
+
+    ref = ref_date or date.today()
+    if ref.day >= 26:
+        start_date = date(ref.year, ref.month, 26)
+        end_date = date(ref.year + 1, 1, 25) if ref.month == 12 else date(ref.year, ref.month + 1, 25)
+    else:
+        end_date = date(ref.year, ref.month, 25)
+        start_date = date(ref.year - 1, 12, 26) if ref.month == 1 else date(ref.year, ref.month - 1, 26)
+    return start_date, end_date
 
 
 class TrackingSyncPipeline(ITrackingPipeline):
@@ -36,17 +69,18 @@ class TrackingSyncPipeline(ITrackingPipeline):
         target_date: Optional[str] = None,
         lookback_days: int = 1,
         auto_catchup: bool = False,
+        payroll_cycle: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
     ) -> SyncResult:
         sync_id = uuid4()
         started_at = datetime.utcnow()
         t0 = time.perf_counter()
 
-        # Determine target dates to synchronize
-        from datetime import date, timedelta
         today = date.today()
 
         # Auto-detect server downtime and expand lookback window to catch up missing dates
-        if auto_catchup and not target_date:
+        if auto_catchup and not target_date and not payroll_cycle and not (start_date and end_date):
             try:
                 latest_date = await self.repository.get_latest_synced_date()
                 if latest_date:
@@ -63,12 +97,20 @@ class TrackingSyncPipeline(ITrackingPipeline):
             except Exception as catchup_err:
                 logger.warning(f"[{sync_id}] Notice during auto-catchup evaluation: {catchup_err}")
 
-        logger.info(f"[{sync_id}] === Starting Timechamp Tracking Sync ({sync_type}, lookback={lookback_days}) ===")
-        total_fetched = 0
-        total_inserted = 0
-
         dates_to_sync: List[Optional[str]] = []
-        if target_date:
+        if payroll_cycle or (start_date and end_date):
+            if payroll_cycle:
+                c_start, c_end = get_payroll_cycle_range(cycle_str=payroll_cycle)
+                logger.info(f"[{sync_id}] [Payroll Cycle] Resolved cycle '{payroll_cycle}' to: {c_start} .. {c_end}")
+            else:
+                c_start = parse_date_flexible(start_date)
+                c_end = parse_date_flexible(end_date)
+                logger.info(f"[{sync_id}] [Custom Range] Resolved date range: {c_start} .. {c_end}")
+            curr = c_start
+            while curr <= c_end:
+                dates_to_sync.append(curr.strftime("%d-%b-%y"))
+                curr += timedelta(days=1)
+        elif target_date:
             dates_to_sync = [target_date]
         elif lookback_days > 0:
             for offset in range(lookback_days + 1):
@@ -76,6 +118,10 @@ class TrackingSyncPipeline(ITrackingPipeline):
                 dates_to_sync.append(d.strftime("%d-%b-%y"))
         else:
             dates_to_sync = [None] # Default API today
+
+        logger.info(f"[{sync_id}] === Starting Timechamp Tracking Sync ({sync_type}, dates={len(dates_to_sync)}) ===")
+        total_fetched = 0
+        total_inserted = 0
 
         try:
             for dt in dates_to_sync:

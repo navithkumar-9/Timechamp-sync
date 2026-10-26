@@ -70,3 +70,26 @@ async def test_tracking_sync_pipeline_success():
     assert result.records_inserted == 1
     mock_repo.save_batch.assert_called_once()
     mock_repo.save_sync_history.assert_called_once()
+
+
+def test_payroll_cycle_range_calculation():
+    from app.integrations.timechamp.pipeline import get_payroll_cycle_range
+    # Test specific cycle month
+    start, end = get_payroll_cycle_range(cycle_str="2026-10")
+    assert start == date(2026, 9, 26)
+    assert end == date(2026, 10, 25)
+
+    # Test boundary on 25th (belongs to current ending cycle)
+    start_25, end_25 = get_payroll_cycle_range(ref_date=date(2026, 10, 25))
+    assert start_25 == date(2026, 9, 26)
+    assert end_25 == date(2026, 10, 25)
+
+    # Test boundary on 26th (belongs to next starting cycle)
+    start_26, end_26 = get_payroll_cycle_range(ref_date=date(2026, 10, 26))
+    assert start_26 == date(2026, 10, 26)
+    assert end_26 == date(2026, 11, 25)
+
+    # Test January rollover
+    start_jan, end_jan = get_payroll_cycle_range(cycle_str="2027-01")
+    assert start_jan == date(2026, 12, 26)
+    assert end_jan == date(2027, 1, 25)
