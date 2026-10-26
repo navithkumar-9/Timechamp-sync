@@ -37,9 +37,11 @@ def mock_external_services(monkeypatch):
 
 
 
+from fastapi.testclient import TestClient
+
+
 @pytest.fixture
-async def async_client():
-    """Async HTTP test client."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        yield client
+def client():
+    """Synchronous test client."""
+    with TestClient(app) as c:
+        yield c

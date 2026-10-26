@@ -1,9 +1,7 @@
-import pytest
-from httpx import AsyncClient
+from fastapi.testclient import TestClient
 
 
-@pytest.mark.asyncio
-async def test_ingest_single_metric(async_client: AsyncClient):
+def test_ingest_single_metric(client: TestClient):
     payload = {
         "tenant_id": "tenant-xyz",
         "device_id": "macbook-pro-14",
@@ -12,7 +10,7 @@ async def test_ingest_single_metric(async_client: AsyncClient):
         "unit": "seconds",
         "tags": {"app": "vscode"},
     }
-    response = await async_client.post("/api/v1/metrics?stream_event=false", json=payload)
+    response = client.post("/api/v1/metrics?stream_event=false", json=payload)
 
     assert response.status_code == 201
     data = response.json()
@@ -21,15 +19,14 @@ async def test_ingest_single_metric(async_client: AsyncClient):
     assert data["data"]["value"] == 120.5
 
 
-@pytest.mark.asyncio
-async def test_query_metrics(async_client: AsyncClient):
+def test_query_metrics(client: TestClient):
     payload = {
         "tenant_id": "test-tenant",
         "metric_name": "cpu_load",
         "limit": 10,
         "offset": 0,
     }
-    response = await async_client.post("/api/v1/metrics/query", json=payload)
+    response = client.post("/api/v1/metrics/query", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True

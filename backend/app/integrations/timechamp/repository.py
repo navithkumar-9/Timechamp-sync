@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 from app.core.config import settings
 from app.core.logger import logger
@@ -234,6 +234,80 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
         except Exception as e:
             logger.warning(f"Could not retrieve latest date from ClickHouse TimeChamp: {e}")
         return None
+
+    async def get_missing_dates(
+        self, start_date: date, end_date: date, min_records: int = 50
+    ) -> List[date]:
+        """
+        Identify any dates between start_date and end_date (inclusive) that have
+        fewer than min_records in ClickHouse TimeChamp.
+        """
+        query = f"""
+            SELECT 
+                toDate(parseDateTime(Date, '%b-%d-%Y')) AS d, 
+                count() AS cnt 
+            FROM {settings.CLICKHOUSE_DB}.TimeChamp 
+            WHERE Date IS NOT NULL AND Date != ''
+              AND toDate(parseDateTime(Date, '%b-%d-%Y')) >= '{start_date.isoformat()}'
+              AND toDate(parseDateTime(Date, '%b-%d-%Y')) <= '{end_date.isoformat()}'
+            GROUP BY d
+        """
+        try:
+            rows = await self.ch.query(query)
+            existing_counts: Dict[date, int] = {}
+            for r in rows:
+                d_val = r.get("d")
+                cnt_val = int(r.get("cnt", 0))
+                if isinstance(d_val, str):
+                    d_val = datetime.strptime(d_val, "%Y-%m-%d").date()
+                if d_val:
+                    existing_counts[d_val] = cnt_val
+
+            missing: List[date] = []
+            cur = start_date
+            while cur <= end_date:
+                count_on_day = existing_counts.get(cur, 0)
+                if count_on_day < min_records:
+                    missing.append(cur)
+                cur += timedelta(days=1)
+            return missing
+        except Exception as e:
+            logger.warning(f"Could not compute missing dates from ClickHouse TimeChamp: {e}")
+            return []
+
+    async def ensure_historical_data_restored(self) -> int:
+        """
+        Verify that historical data prior to the active cycle (< 2026-09-26) is preserved in TimeChamp.
+        If missing (e.g. following accidental table truncation), restore from TimeChamp_Backup.
+        """
+        check_query = f"""
+            SELECT count() AS cnt 
+            FROM {settings.CLICKHOUSE_DB}.TimeChamp 
+            WHERE Date IS NOT NULL AND Date != '' 
+              AND toDate(parseDateTime(Date, '%b-%d-%Y')) < '2026-09-26'
+        """
+        try:
+            rows = await self.ch.query(check_query)
+            cnt = int(rows[0].get("cnt", 0)) if rows else 0
+            if cnt == 0:
+                logger.warning(
+                    f"Historical data prior to 2026-09-26 is missing in {settings.CLICKHOUSE_DB}.TimeChamp! "
+                    f"Restoring from {settings.CLICKHOUSE_DB}.TimeChamp_Backup..."
+                )
+                restore_cmd = f"""
+                    INSERT INTO {settings.CLICKHOUSE_DB}.TimeChamp 
+                    SELECT * FROM {settings.CLICKHOUSE_DB}.TimeChamp_Backup 
+                    WHERE toDate(parseDateTime(Date, '%b-%d-%Y')) < '2026-09-26'
+                """
+                await self.ch.command(restore_cmd)
+                verify_rows = await self.ch.query(check_query)
+                restored_cnt = int(verify_rows[0].get("cnt", 0)) if verify_rows else 0
+                logger.info(f"✓ Successfully restored {restored_cnt} historical records into TimeChamp.")
+                return restored_cnt
+            return cnt
+        except Exception as e:
+            logger.warning(f"Notice during historical data verification/restore: {e}")
+            return 0
 
 
 default_repository = ClickHouseTrackingSummaryRepository()

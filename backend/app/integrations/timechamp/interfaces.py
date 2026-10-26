@@ -81,6 +81,18 @@ class ITrackingSummaryRepository(ABC):
         """Fetch the most recent timesheet_date stored in ClickHouse."""
         pass
 
+    @abstractmethod
+    async def get_missing_dates(
+        self, start_date: date, end_date: date, min_records: int = 50
+    ) -> List[date]:
+        """Identify any dates within range having fewer than min_records in ClickHouse."""
+        pass
+
+    @abstractmethod
+    async def ensure_historical_data_restored(self) -> int:
+        """Ensure historical records prior to active payroll cycle are restored from backup if missing."""
+        pass
+
 
 class ITrackingPipeline(ABC):
     """Interface for coordinating the end-to-end sync workflow (SRP: Orchestration)."""

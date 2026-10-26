@@ -50,6 +50,30 @@ def get_payroll_cycle_range(ref_date: Optional[date] = None, cycle_str: Optional
     return start_date, end_date
 
 
+def get_catchup_check_window(ref_date: Optional[date] = None) -> Tuple[date, date]:
+    """
+    Returns (start_date, end_date) representing the window that must have complete tracking data.
+    Ensures both the active payroll cycle and the immediately preceding payroll cycle are verified.
+    Cycles run from 26th of month M-1 to 25th of month M.
+    """
+    ref = ref_date or date.today()
+    if ref.day >= 26:
+        # Currently at start of new cycle. Preceding cycle began on 26th of month M-1.
+        prev_m = 12 if ref.month == 1 else ref.month - 1
+        prev_y = ref.year - 1 if ref.month == 1 else ref.year
+        start_date = date(prev_y, prev_m, 26)
+    else:
+        # Currently inside cycle (month M-1 -> month M).
+        # Cycle began on 26th of month M-1.
+        # Preceding cycle began on 26th of month M-2.
+        m1 = 12 if ref.month == 1 else ref.month - 1
+        y1 = ref.year - 1 if ref.month == 1 else ref.year
+        m2 = 12 if m1 == 1 else m1 - 1
+        y2 = y1 - 1 if m1 == 1 else y1
+        start_date = date(y2, m2, 26)
+    return start_date, ref
+
+
 class TrackingSyncPipeline(ITrackingPipeline):
     """Production ETL Pipeline orchestrating the extraction, transformation, and ClickHouse persistence."""
 
@@ -78,26 +102,32 @@ class TrackingSyncPipeline(ITrackingPipeline):
         t0 = time.perf_counter()
 
         today = date.today()
+        dates_to_sync: List[Optional[str]] = []
 
-        # Auto-detect server downtime and expand lookback window to catch up missing dates
+        # Auto-detect missing dates and restore any missing historical data
         if auto_catchup and not target_date and not payroll_cycle and not (start_date and end_date):
             try:
-                latest_date = await self.repository.get_latest_synced_date()
-                if latest_date:
-                    gap_days = (today - latest_date).days
-                    if gap_days > 1:
-                        # Add 1 extra day lookback for offline hours flush, capped at 30 days
-                        effective_lookback = min(max(lookback_days, gap_days + 1), 30)
-                        logger.info(
-                            f"[{sync_id}] [Auto-Catchup] Server downtime detected: "
-                            f"last synced date in ClickHouse was {latest_date} ({gap_days} days ago). "
-                            f"Automatically backfilling missing dates with lookback={effective_lookback} days."
-                        )
-                        lookback_days = effective_lookback
+                # 1. Guarantee historical data (< 2026-09-26) is preserved in TimeChamp
+                await self.repository.ensure_historical_data_restored()
+
+                # 2. Check for missing/incomplete dates in payroll window
+                window_start, _ = get_catchup_check_window(today)
+                # Check up to yesterday; today will always be included
+                missing_dates = await self.repository.get_missing_dates(
+                    window_start, today - timedelta(days=1), min_records=50
+                )
+                if missing_dates:
+                    logger.info(
+                        f"[{sync_id}] [Auto-Catchup] Found {len(missing_dates)} missing/incomplete date(s) in "
+                        f"payroll window ({window_start} to {today - timedelta(days=1)}). Adding to sync queue."
+                    )
+                    for d in missing_dates:
+                        d_str = d.strftime("%d-%b-%y")
+                        if d_str not in dates_to_sync:
+                            dates_to_sync.append(d_str)
             except Exception as catchup_err:
                 logger.warning(f"[{sync_id}] Notice during auto-catchup evaluation: {catchup_err}")
 
-        dates_to_sync: List[Optional[str]] = []
         if payroll_cycle or (start_date and end_date):
             if payroll_cycle:
                 c_start, c_end = get_payroll_cycle_range(cycle_str=payroll_cycle)
@@ -112,10 +142,13 @@ class TrackingSyncPipeline(ITrackingPipeline):
                 curr += timedelta(days=1)
         elif target_date:
             dates_to_sync = [target_date]
-        elif lookback_days > 0:
-            for offset in range(lookback_days + 1):
-                d = today - timedelta(days=offset)
-                dates_to_sync.append(d.strftime("%d-%b-%y"))
+        elif dates_to_sync or auto_catchup or lookback_days > 0:
+            # Ensure recent lookback window (today and yesterday) is always refreshed
+            for offset in range(max(lookback_days, 1) + 1):
+                d_str = (today - timedelta(days=offset)).strftime("%d-%b-%y")
+                if d_str not in dates_to_sync:
+                    dates_to_sync.append(d_str)
+            dates_to_sync.sort(key=lambda s: parse_date_flexible(s))
         else:
             dates_to_sync = [None] # Default API today
 

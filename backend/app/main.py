@@ -31,18 +31,29 @@ async def lifespan(app: FastAPI):
 
     # 3. Automatic Downtime Catch-up Sync on Startup with Distributed Lock
     async def _startup_catchup():
-        await asyncio.sleep(3) # Brief delay to allow initial server startup to complete
-        try:
-            from app.integrations.timechamp.token_manager import get_token_manager
-            tm = get_token_manager()
+        await asyncio.sleep(2) # Brief delay to allow initial server startup to complete
+        from app.integrations.timechamp.token_manager import get_token_manager
+        tm = get_token_manager()
+
+        # Connect to Redis with retry to ensure workers synchronize reliably
+        r = None
+        for _ in range(15):
             r = await tm._get_redis_conn()
             if r:
-                # Distributed lock ensures only 1 worker process executes catchup on startup
-                acquired = await r.set("timechamp:lock:startup_catchup", "1", nx=True, ex=90)
-                await r.aclose()
-                if not acquired:
-                    logger.info("Startup auto-catchup is already being handled by another worker process.")
-                    return
+                break
+            await asyncio.sleep(1)
+
+        if not r:
+            logger.warning("Could not establish Redis connection for startup lock. Skipping startup catchup.")
+            return
+
+        try:
+            # Distributed lock ensures ONLY 1 worker process executes catchup on startup.
+            # TTL=300s ensures other workers do not re-run catchup when worker 1 completes.
+            acquired = await r.set("timechamp:lock:startup_catchup", "1", nx=True, ex=300)
+            if not acquired:
+                logger.info("Startup auto-catchup is already being handled by another worker process.")
+                return
 
             from app.integrations.timechamp.pipeline import get_sync_pipeline
             pipe = get_sync_pipeline()
@@ -51,6 +62,11 @@ async def lifespan(app: FastAPI):
             logger.info(f"✓ Startup auto-catchup finished: {result.records_inserted} rows updated.")
         except Exception as e:
             logger.warning(f"Startup catchup notice: {e}")
+        finally:
+            try:
+                await r.aclose()
+            except Exception:
+                pass
 
     import asyncio
     asyncio.create_task(_startup_catchup())

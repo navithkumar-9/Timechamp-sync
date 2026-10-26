@@ -93,3 +93,55 @@ def test_payroll_cycle_range_calculation():
     start_jan, end_jan = get_payroll_cycle_range(cycle_str="2027-01")
     assert start_jan == date(2026, 12, 26)
     assert end_jan == date(2027, 1, 25)
+
+
+def test_catchup_check_window_calculation():
+    from app.integrations.timechamp.pipeline import get_catchup_check_window
+
+    # Day >= 26 (e.g. Oct 26: should check back to Sep 26)
+    start_oct26, end_oct26 = get_catchup_check_window(ref_date=date(2026, 10, 26))
+    assert start_oct26 == date(2026, 9, 26)
+    assert end_oct26 == date(2026, 10, 26)
+
+    # Day < 26 (e.g. Oct 15: should check back to Aug 26)
+    start_oct15, end_oct15 = get_catchup_check_window(ref_date=date(2026, 10, 15))
+    assert start_oct15 == date(2026, 8, 26)
+    assert end_oct15 == date(2026, 10, 15)
+
+    # January rollover (Jan 5: should check back to Nov 26 of prior year)
+    start_jan5, end_jan5 = get_catchup_check_window(ref_date=date(2027, 1, 5))
+    assert start_jan5 == date(2026, 11, 26)
+    assert end_jan5 == date(2027, 1, 5)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_auto_catchup_detects_and_backfills_missing_dates():
+    from app.integrations.timechamp.pipeline import TrackingSyncPipeline
+
+    mock_client = MagicMock()
+    mock_client.get_tracking_summary_data = AsyncMock(return_value=[
+        {"empID": "W001", "username": "u@test.com", "timesheetDate": "20-Oct-26", "totalTime": 100}
+    ])
+
+    mock_repo = MagicMock()
+    mock_repo.ensure_historical_data_restored = AsyncMock(return_value=16308)
+    mock_repo.get_missing_dates = AsyncMock(return_value=[date(2026, 10, 20)])
+    mock_repo.save_batch = AsyncMock(return_value=1)
+    mock_repo.save_sync_history = AsyncMock(return_value=None)
+
+    transformer = TrackingDataTransformer()
+    pipeline = TrackingSyncPipeline(
+        client=mock_client,
+        transformer=transformer,
+        repository=mock_repo,
+    )
+
+    result = await pipeline.run_sync(sync_type="STARTUP_AUTO_CATCHUP", auto_catchup=True)
+    assert result.success is True
+    # Verify ensure_historical_data_restored was executed
+    mock_repo.ensure_historical_data_restored.assert_called_once()
+    # Verify get_missing_dates was executed
+    mock_repo.get_missing_dates.assert_called_once()
+    # Verify missing date (20-Oct-26) was fetched
+    called_dates = [call.kwargs.get("target_date") for call in mock_client.get_tracking_summary_data.call_args_list]
+    assert "20-Oct-26" in called_dates
