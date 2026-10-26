@@ -138,13 +138,26 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
                 r.updated_at,
             ])
 
-        # 1. Persist into COMMAND_CENTER.timechamp_tracking_summary
-        summary_table = f"{settings.CLICKHOUSE_DB}.timechamp_tracking_summary"
-        logger.info(f"Persisting batch of {len(summary_rows)} records into {summary_table}...")
-        await self.ch.insert(table="timechamp_tracking_summary", data=summary_rows, column_names=TRACKING_SUMMARY_COLUMNS)
+        target_table = f"{settings.CLICKHOUSE_DB}.TimeChamp"
 
-        logger.info(f"✓ Successfully inserted {len(records)} tracking summary rows into {summary_table}.")
-        return len(records)
+        # Deduplicate: delete existing records for these dates in TimeChamp prior to insert
+        dates = list({r.date_str for r in records if r.date_str})
+        if dates:
+            date_filter = ", ".join([f"'{d}'" for d in dates])
+            delete_cmd = f"ALTER TABLE {target_table} DELETE WHERE Date IN ({date_filter})"
+            logger.info(f"Purging existing records in {target_table} for dates: {dates} prior to insert...")
+            try:
+                client = self.ch.connect()
+                client.command(delete_cmd, settings={"mutations_sync": 1})
+            except Exception as del_err:
+                logger.warning(f"Notice while clearing existing date records from {target_table}: {del_err}")
+
+        # Persist into COMMAND_CENTER.TimeChamp
+        logger.info(f"Persisting batch of {len(legacy_rows)} records into {target_table}...")
+        await self.ch.insert(table="TimeChamp", data=legacy_rows, column_names=TIMECHAMP_LEGACY_COLUMNS)
+
+        logger.info(f"✓ Successfully inserted {len(legacy_rows)} rows into {target_table}.")
+        return len(legacy_rows)
 
     async def save_sync_history(self, log: SyncHistoryRecord) -> None:
         row = [[
@@ -164,26 +177,26 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
             logger.error(f"Failed to record sync history to ClickHouse: {e}")
 
     async def query_tracking_summary(self, filters: TrackingSummaryFilter) -> List[Dict[str, Any]]:
-        conditions = []
+        conditions = ["Date IS NOT NULL AND Date != ''"]
         if filters.emp_id:
             conditions.append(f"`Employee Id` = '{filters.emp_id}'")
         if filters.department_name:
             conditions.append(f"Department = '{filters.department_name}'")
         if filters.start_date:
-            conditions.append(f"timesheet_date >= '{filters.start_date.isoformat()}'")
+            conditions.append(f"toDate(parseDateTime(Date, '%b-%d-%Y')) >= '{filters.start_date.isoformat()}'")
         if filters.end_date:
-            conditions.append(f"timesheet_date <= '{filters.end_date.isoformat()}'")
+            conditions.append(f"toDate(parseDateTime(Date, '%b-%d-%Y')) <= '{filters.end_date.isoformat()}'")
 
-        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        where_clause = f"WHERE {' AND '.join(conditions)}"
         query = f"""
             SELECT
-                id,
+                generateUUIDv4() AS id,
                 `Employee Id` AS emp_id,
                 Email AS username,
                 `Employee Name` AS name,
                 Department AS department_name,
                 `Report Head` AS reporting_head_name,
-                timesheet_date,
+                toDate(parseDateTime(Date, '%b-%d-%Y')) AS timesheet_date,
                 Date AS timesheet_date_raw,
                 `In Time` AS in_time,
                 `Out Time` AS out_time,
@@ -195,8 +208,8 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
                 `Neutral Time` AS neutral_time,
                 `Productive Hours Percentage` AS productive_percentage,
                 `Working Hours Percentage` AS working_percentage,
-                updated_at
-            FROM {settings.CLICKHOUSE_DB}.timechamp_tracking_summary
+                now() AS updated_at
+            FROM {settings.CLICKHOUSE_DB}.TimeChamp
             {where_clause}
             ORDER BY timesheet_date DESC, Department ASC, `Employee Id` ASC
             LIMIT {filters.limit} OFFSET {filters.offset}
@@ -204,8 +217,12 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
         return await self.ch.query(query)
 
     async def get_latest_synced_date(self) -> Optional[date]:
-        """Fetch the most recent timesheet_date stored in ClickHouse."""
-        query = f"SELECT max(timesheet_date) as max_date FROM {settings.CLICKHOUSE_DB}.timechamp_tracking_summary"
+        """Fetch the most recent timesheet_date stored in ClickHouse TimeChamp."""
+        query = f"""
+            SELECT max(toDate(parseDateTime(Date, '%b-%d-%Y'))) as max_date 
+            FROM {settings.CLICKHOUSE_DB}.TimeChamp 
+            WHERE Date IS NOT NULL AND Date != ''
+        """
         try:
             rows = await self.ch.query(query)
             if rows and rows[0].get("max_date"):
@@ -215,7 +232,7 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
                 elif isinstance(val, str):
                     return datetime.strptime(val, "%Y-%m-%d").date()
         except Exception as e:
-            logger.warning(f"Could not retrieve latest timesheet_date from ClickHouse: {e}")
+            logger.warning(f"Could not retrieve latest date from ClickHouse TimeChamp: {e}")
         return None
 
 

@@ -17,8 +17,12 @@ def optimize_clickhouse_tables():
     logger.info("[Celery Beat] Triggering ClickHouse OPTIMIZE TABLE...")
     try:
         client = ch_manager.connect()
-        client.command("OPTIMIZE TABLE timechamp_tracking_summary FINAL")
-        logger.info("[Celery Beat] ClickHouse table optimization completed successfully.")
+        client.command("OPTIMIZE TABLE TimeChamp FINAL")
+        try:
+            client.command("OPTIMIZE TABLE timechamp_tracking_summary FINAL")
+        except Exception:
+            pass
+        logger.info("[Celery Beat] ClickHouse TimeChamp table optimization completed successfully.")
         return {"status": "SUCCESS"}
     except Exception as e:
         logger.warning(f"[Celery Beat] Notice during table optimization: {e}")

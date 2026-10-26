@@ -71,7 +71,7 @@ async def get_tracking_summary(
     offset: int = Query(0, ge=0),
     repo: ITrackingSummaryRepository = Depends(get_repository),
 ):
-    """Queries normalized tracking summary records from ClickHouse timechamp_tracking_summary."""
+    """Queries normalized tracking summary records from ClickHouse COMMAND_CENTER.TimeChamp."""
     filters = TrackingSummaryFilter(
         emp_id=emp_id,
         department_name=department_name,

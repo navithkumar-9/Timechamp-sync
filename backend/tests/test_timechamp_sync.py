@@ -30,10 +30,12 @@ def test_tracking_data_transformer():
     assert record.name == "Test User"
     assert record.department_name == "Engineering"
     assert record.timesheet_date == date(2026, 10, 14)
-    assert record.total_time == 32400
-    assert record.productive_time == 25200
-    assert record.productive_percentage == 77.78
-    assert record.working_percentage == 88.89
+    assert record.total_time == "09:00:00"
+    assert record.total_time_seconds == 32400
+    assert record.productive_hours == "07:00:00"
+    assert record.productive_time_seconds == 25200
+    assert record.working_hours == "08:00:00"
+    assert record.working_time_seconds == 28800
 
 
 @pytest.mark.asyncio
@@ -62,7 +64,7 @@ async def test_tracking_sync_pipeline_success():
         repository=mock_repo,
     )
 
-    result = await pipeline.run_sync(sync_type="UNIT_TEST")
+    result = await pipeline.run_sync(sync_type="UNIT_TEST", target_date="14-Oct-26")
     assert result.success is True
     assert result.records_fetched == 1
     assert result.records_inserted == 1
