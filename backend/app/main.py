@@ -29,10 +29,21 @@ async def lifespan(app: FastAPI):
     if await stream_producer.is_healthy():
         logger.info("✓ Redis Stream Producer active.")
 
-    # 3. Automatic Downtime Catch-up Sync on Startup
+    # 3. Automatic Downtime Catch-up Sync on Startup with Distributed Lock
     async def _startup_catchup():
-        await asyncio.sleep(2) # Brief delay to allow initial server startup to complete
+        await asyncio.sleep(3) # Brief delay to allow initial server startup to complete
         try:
+            from app.integrations.timechamp.token_manager import get_token_manager
+            tm = get_token_manager()
+            r = await tm._get_redis_conn()
+            if r:
+                # Distributed lock ensures only 1 worker process executes catchup on startup
+                acquired = await r.set("timechamp:lock:startup_catchup", "1", nx=True, ex=90)
+                await r.aclose()
+                if not acquired:
+                    logger.info("Startup auto-catchup is already being handled by another worker process.")
+                    return
+
             from app.integrations.timechamp.pipeline import get_sync_pipeline
             pipe = get_sync_pipeline()
             logger.info("Checking for any missed dates during server downtime...")
