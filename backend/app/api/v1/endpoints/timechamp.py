@@ -31,7 +31,7 @@ router = APIRouter()
 async def trigger_timechamp_sync(
     async_mode: bool = Query(False, description="Run in background via Celery worker if True"),
     target_date: Optional[str] = Query(None, description="Specific date to sync (e.g. '13-Oct-26' or '2026-10-13')"),
-    lookback_days: int = Query(1, description="Number of past days to backfill for offline work"),
+    lookback_days: int = Query(5, description="Number of past days to check and backfill for offline work (default 5 days)"),
     auto_catchup: bool = Query(True, description="Automatically detect and backfill missing dates if server was down"),
     payroll_cycle: Optional[str] = Query(None, description="Payroll cycle month to sync, e.g. '2026-10' for 26-Sep to 25-Oct"),
     start_date: Optional[str] = Query(None, description="Custom start date for date range sync (e.g. '2026-09-26')"),

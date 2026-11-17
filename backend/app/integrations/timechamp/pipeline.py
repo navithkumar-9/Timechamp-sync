@@ -92,7 +92,7 @@ class TrackingSyncPipeline(ITrackingPipeline):
         self,
         sync_type: str = "MANUAL",
         target_date: Optional[str] = None,
-        lookback_days: int = 1,
+        lookback_days: int = 5,
         auto_catchup: bool = False,
         payroll_cycle: Optional[str] = None,
         start_date: Optional[str] = None,
@@ -105,16 +105,33 @@ class TrackingSyncPipeline(ITrackingPipeline):
         today = date.today()
         dates_to_sync: List[Optional[str]] = []
 
-        # Auto-detect missing dates and restore any missing historical data
+        # 1. Specifically audit previous 5 days: if any date is unsynced/incomplete, queue for update
+        if not target_date and not payroll_cycle and not (start_date and end_date):
+            try:
+                past_5_start = today - timedelta(days=5)
+                past_5_end = today - timedelta(days=1)
+                unsynced_5 = await self.repository.get_unsynced_dates(past_5_start, past_5_end, min_records=50)
+                if unsynced_5:
+                    logger.warning(
+                        f"[{sync_id}] [5-Day Audit] Found {len(unsynced_5)} unsynced/incomplete date(s) in "
+                        f"previous 5 days ({[d.strftime('%d-%b-%y') for d in unsynced_5]}). Adding to sync queue."
+                    )
+                    for d in unsynced_5:
+                        d_str = d.strftime("%d-%b-%y")
+                        if d_str not in dates_to_sync:
+                            dates_to_sync.append(d_str)
+            except Exception as audit_err:
+                logger.warning(f"[{sync_id}] Notice during 5-day lookback audit: {audit_err}")
+
+        # 2. Auto-detect missing dates and restore any missing historical data across payroll cycle
         if auto_catchup and not target_date and not payroll_cycle and not (start_date and end_date):
             try:
-                # 1. Guarantee historical data (< 2026-09-26) is preserved in TimeChamp
+                # Guarantee historical data (< 2026-09-26) is preserved in TimeChamp
                 await self.repository.ensure_historical_data_restored()
 
-                # 2. Check for missing/incomplete dates in payroll window
+                # Check for missing/incomplete dates in payroll window
                 window_start, _ = get_catchup_check_window(today)
-                # Check up to yesterday; today will always be included
-                missing_dates = await self.repository.get_missing_dates(
+                missing_dates = await self.repository.get_unsynced_dates(
                     window_start, today - timedelta(days=1), min_records=50
                 )
                 if missing_dates:
@@ -144,7 +161,7 @@ class TrackingSyncPipeline(ITrackingPipeline):
         elif target_date:
             dates_to_sync = [target_date]
         elif dates_to_sync or auto_catchup or lookback_days > 0:
-            # Ensure recent lookback window (today and yesterday) is always refreshed
+            # Refresh lookback window (today and lookback_days)
             for offset in range(max(lookback_days, 1) + 1):
                 d_str = (today - timedelta(days=offset)).strftime("%d-%b-%y")
                 if d_str not in dates_to_sync:

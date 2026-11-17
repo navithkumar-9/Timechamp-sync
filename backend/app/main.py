@@ -57,8 +57,8 @@ async def lifespan(app: FastAPI):
 
             from app.integrations.timechamp.pipeline import get_sync_pipeline
             pipe = get_sync_pipeline()
-            logger.info("Checking for any missed dates during server downtime...")
-            result = await pipe.run_sync(sync_type="STARTUP_AUTO_CATCHUP", auto_catchup=True)
+            logger.info("Checking for any missed dates during server downtime (5-day audit)...")
+            result = await pipe.run_sync(sync_type="STARTUP_AUTO_CATCHUP", lookback_days=5, auto_catchup=True)
             logger.info(f"✓ Startup auto-catchup finished: {result.records_inserted} rows updated.")
         except Exception as e:
             logger.warning(f"Startup catchup notice: {e}")

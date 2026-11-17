@@ -144,6 +144,23 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
         dates = list({r.date_str for r in records if r.date_str})
         if dates:
             date_filter = ", ".join([f"'{d}'" for d in dates])
+            
+            # --- DATA LOSS PREVENTION GUARD ---
+            # Ensure an anomalous, truncated API batch does not overwrite existing healthy records
+            try:
+                client = self.ch.connect()
+                check_res = client.query(f"SELECT count() FROM {target_table} WHERE Date IN ({date_filter})")
+                existing_cnt = int(check_res.result_rows[0][0]) if check_res.result_rows else 0
+                if existing_cnt >= 50 and len(legacy_rows) < (existing_cnt * 0.5):
+                    logger.error(
+                        f"[DATA LOSS PREVENTION] Aborting batch save for dates {dates}! "
+                        f"Existing ClickHouse records: {existing_cnt}, but incoming API batch only contains {len(legacy_rows)} records. "
+                        f"Preserving existing database records to prevent data loss."
+                    )
+                    return 0
+            except Exception as check_err:
+                logger.warning(f"Notice during data loss pre-check: {check_err}")
+
             delete_cmd = f"ALTER TABLE {target_table} DELETE WHERE Date IN ({date_filter})"
             logger.info(f"Purging existing records in {target_table} for dates: {dates} prior to insert...")
             try:
@@ -273,6 +290,56 @@ class ClickHouseTrackingSummaryRepository(ITrackingSummaryRepository):
             return missing
         except Exception as e:
             logger.warning(f"Could not compute missing dates from ClickHouse TimeChamp: {e}")
+            return []
+
+    async def get_unsynced_dates(
+        self, start_date: date, end_date: date, min_records: int = 50
+    ) -> List[date]:
+        """
+        Identify any dates between start_date and end_date (inclusive) that are missing,
+        incomplete, or contain only blank/empty records.
+        """
+        query = f"""
+            SELECT 
+                toDate(parseDateTime(Date, '%b-%d-%Y')) AS d, 
+                count() AS total_cnt,
+                countIf("Total Time" != '00:00:00' OR "Attendance" != 'Absent') AS active_cnt
+            FROM {settings.CLICKHOUSE_DB}.TimeChamp 
+            WHERE Date IS NOT NULL AND Date != ''
+              AND toDate(parseDateTime(Date, '%b-%d-%Y')) >= '{start_date.isoformat()}'
+              AND toDate(parseDateTime(Date, '%b-%d-%Y')) <= '{end_date.isoformat()}'
+            GROUP BY d
+        """
+        try:
+            rows = await self.ch.query(query)
+            existing_stats: Dict[date, Dict[str, int]] = {}
+            for r in rows:
+                d_val = r.get("d")
+                if isinstance(d_val, str):
+                    d_val = datetime.strptime(d_val, "%Y-%m-%d").date()
+                if d_val:
+                    existing_stats[d_val] = {
+                        "total_cnt": int(r.get("total_cnt", 0)),
+                        "active_cnt": int(r.get("active_cnt", 0)),
+                    }
+
+            unsynced: List[date] = []
+            cur = start_date
+            while cur <= end_date:
+                stats = existing_stats.get(cur)
+                if not stats:
+                    # Date is completely missing in ClickHouse
+                    unsynced.append(cur)
+                elif stats["total_cnt"] < min_records:
+                    # Incomplete records (< min_records)
+                    unsynced.append(cur)
+                elif stats["active_cnt"] == 0 and cur.weekday() < 5:
+                    # Weekday with 0 active hours (all blank/placeholder records)
+                    unsynced.append(cur)
+                cur += timedelta(days=1)
+            return unsynced
+        except Exception as e:
+            logger.warning(f"Could not compute unsynced dates from ClickHouse TimeChamp: {e}")
             return []
 
     async def ensure_historical_data_restored(self) -> int:

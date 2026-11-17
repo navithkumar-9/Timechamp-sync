@@ -89,6 +89,13 @@ class ITrackingSummaryRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_unsynced_dates(
+        self, start_date: date, end_date: date, min_records: int = 50
+    ) -> List[date]:
+        """Identify any dates within range that are missing, incomplete, or contain only blank placeholder records."""
+        pass
+
+    @abstractmethod
     async def ensure_historical_data_restored(self) -> int:
         """Ensure historical records prior to active payroll cycle are restored from backup if missing."""
         pass
@@ -102,7 +109,7 @@ class ITrackingPipeline(ABC):
         self,
         sync_type: str = "MANUAL",
         target_date: Optional[str] = None,
-        lookback_days: int = 1,
+        lookback_days: int = 5,
         auto_catchup: bool = False,
         payroll_cycle: Optional[str] = None,
         start_date: Optional[str] = None,

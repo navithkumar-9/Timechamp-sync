@@ -31,12 +31,13 @@ def optimize_clickhouse_tables():
 
 @celery_app.task(name="app.tasks.periodic_tasks.periodic_timechamp_sync")
 def periodic_timechamp_sync():
-    """Scheduled task pulling tracking summary data from Timechamp API into ClickHouse."""
+    """Scheduled task pulling tracking summary data from Timechamp API into ClickHouse.
+    Audits the previous 5 days for any missing or incomplete records, updating previous 5 days and current data."""
     import asyncio
     from app.integrations.timechamp.pipeline import get_sync_pipeline
 
-    logger.info("[Celery Beat Scheduled] Executing periodic Timechamp data sync...")
+    logger.info("[Celery Beat Scheduled] Executing periodic Timechamp data sync (5-day lookback audit)...")
     pipeline = get_sync_pipeline()
-    result = asyncio.run(pipeline.run_sync(sync_type="SCHEDULED_CRON", auto_catchup=True))
+    result = asyncio.run(pipeline.run_sync(sync_type="SCHEDULED_CRON", lookback_days=5, auto_catchup=True))
     return result.model_dump()
 

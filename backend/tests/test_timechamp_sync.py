@@ -125,7 +125,7 @@ async def test_pipeline_auto_catchup_detects_and_backfills_missing_dates():
 
     mock_repo = MagicMock()
     mock_repo.ensure_historical_data_restored = AsyncMock(return_value=16308)
-    mock_repo.get_missing_dates = AsyncMock(return_value=[date(2026, 10, 20)])
+    mock_repo.get_unsynced_dates = AsyncMock(return_value=[date(2026, 10, 20)])
     mock_repo.save_batch = AsyncMock(return_value=1)
     mock_repo.save_sync_history = AsyncMock(return_value=None)
 
@@ -140,8 +140,8 @@ async def test_pipeline_auto_catchup_detects_and_backfills_missing_dates():
     assert result.success is True
     # Verify ensure_historical_data_restored was executed
     mock_repo.ensure_historical_data_restored.assert_called_once()
-    # Verify get_missing_dates was executed
-    mock_repo.get_missing_dates.assert_called_once()
+    # Verify get_unsynced_dates was executed
+    assert mock_repo.get_unsynced_dates.call_count >= 1
     # Verify missing date (20-Oct-26) was fetched
     called_dates = [call.kwargs.get("target_date") for call in mock_client.get_tracking_summary_data.call_args_list]
     assert "20-Oct-26" in called_dates
@@ -282,3 +282,74 @@ async def test_pipeline_multi_date_resilience_partial_success():
     history_record = mock_repo.save_sync_history.call_args[0][0]
     assert history_record.status == "PARTIAL_SUCCESS"
     assert "16-Nov-26" in history_record.error_message
+
+
+@pytest.mark.asyncio
+async def test_5_day_audit_queues_unsynced_previous_dates():
+    """Verify that the 5-day audit detects an unsynced previous date and queues it for sync."""
+    from datetime import timedelta
+    from app.integrations.timechamp.pipeline import TrackingSyncPipeline
+
+    today = date.today()
+    unsynced_date = today - timedelta(days=3)
+
+    mock_client = MagicMock()
+    mock_client.get_tracking_summary_data = AsyncMock(return_value=[
+        {"empID": "W001", "username": "u@test.com", "timesheetDate": "14-Nov-26", "totalTime": 100}
+    ])
+
+    mock_repo = MagicMock()
+    # Simulate that 3 days ago is detected as unsynced
+    mock_repo.get_unsynced_dates = AsyncMock(return_value=[unsynced_date])
+    mock_repo.ensure_historical_data_restored = AsyncMock(return_value=16308)
+    mock_repo.save_batch = AsyncMock(return_value=1)
+    mock_repo.save_sync_history = AsyncMock(return_value=None)
+
+    transformer = TrackingDataTransformer()
+    pipeline = TrackingSyncPipeline(
+        client=mock_client,
+        transformer=transformer,
+        repository=mock_repo,
+    )
+
+    result = await pipeline.run_sync(sync_type="5_DAY_AUDIT_TEST", lookback_days=1, auto_catchup=False)
+
+    assert result.success is True
+    # Verify get_unsynced_dates was called for the 5-day window
+    mock_repo.get_unsynced_dates.assert_called_once()
+    called_dates = [call.kwargs.get("target_date") for call in mock_client.get_tracking_summary_data.call_args_list]
+    expected_date_str = unsynced_date.strftime("%d-%b-%y")
+    assert expected_date_str in called_dates
+
+
+@pytest.mark.asyncio
+async def test_data_loss_prevention_rejects_truncated_batch():
+    """Verify that save_batch aborts deletion if existing ClickHouse rows >= 50 and incoming batch < 50% of existing count."""
+    from app.integrations.timechamp.repository import ClickHouseTrackingSummaryRepository
+    from app.integrations.timechamp.models import TrackingSummaryRecord
+
+    mock_ch = MagicMock()
+    mock_client = MagicMock()
+    # Simulate ClickHouse already having 73 records for Nov-16-2026
+    mock_client.query.return_value = MagicMock(result_rows=[(73,)])
+    mock_client.command = MagicMock()
+    mock_ch.connect.return_value = mock_client
+    mock_ch.insert = AsyncMock()
+
+    repo = ClickHouseTrackingSummaryRepository(ch=mock_ch)
+
+    # An incoming batch with only 2 records (anomalous API response)
+    transformer = TrackingDataTransformer()
+    anomalous_records = transformer.transform_batch([
+        {"empID": "W001", "username": "u1@test.com", "timesheetDate": "16-Nov-26", "totalTime": 100},
+        {"empID": "W002", "username": "u2@test.com", "timesheetDate": "16-Nov-26", "totalTime": 100},
+    ])
+
+    saved_count = await repo.save_batch(anomalous_records)
+
+    # Must abort to prevent deleting 73 rows and replacing with only 2 rows
+    assert saved_count == 0
+    # Ensure DELETE command was NEVER executed
+    mock_client.command.assert_not_called()
+    # Ensure insert was NEVER called
+    mock_ch.insert.assert_not_called()
