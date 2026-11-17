@@ -2,6 +2,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
+from app.core.exceptions import TimechampException
 from app.core.logger import logger
 from app.integrations.timechamp.client import get_timechamp_api_client
 from app.integrations.timechamp.interfaces import (
@@ -157,18 +158,27 @@ class TrackingSyncPipeline(ITrackingPipeline):
         total_inserted = 0
 
         try:
+            failed_dates: List[str] = []
             for dt in dates_to_sync:
                 dt_label = dt or "today"
                 logger.info(f"[{sync_id}] Fetching tracking summary for date: {dt_label}...")
-                raw_records = await self.client.get_tracking_summary_data(target_date=dt)
-                records_fetched = len(raw_records)
-                total_fetched += records_fetched
+                try:
+                    raw_records = await self.client.get_tracking_summary_data(target_date=dt)
+                    records_fetched = len(raw_records)
+                    total_fetched += records_fetched
 
-                if records_fetched > 0:
-                    domain_records = self.transformer.transform_batch(raw_records)
-                    inserted = await self.repository.save_batch(domain_records)
-                    total_inserted += inserted
-                    logger.info(f"[{sync_id}] Processed {inserted} records for date: {dt_label}")
+                    if records_fetched > 0:
+                        domain_records = self.transformer.transform_batch(raw_records)
+                        inserted = await self.repository.save_batch(domain_records)
+                        total_inserted += inserted
+                        logger.info(f"[{sync_id}] Processed {inserted} records for date: {dt_label}")
+                except Exception as date_exc:
+                    logger.error(f"[{sync_id}] Error syncing date {dt_label}: {date_exc}")
+                    failed_dates.append(f"{dt_label}: {str(date_exc)}")
+
+            # If all requested dates failed, raise error to record pipeline failure
+            if failed_dates and total_inserted == 0 and total_fetched == 0:
+                raise TimechampException(f"All dates failed to sync: {'; '.join(failed_dates)}")
 
             # Asynchronously notify Redis Stream of completed sync
             try:
@@ -185,29 +195,32 @@ class TrackingSyncPipeline(ITrackingPipeline):
                 logger.debug(f"Stream notification skipped: {stream_err}")
 
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+            sync_status = "PARTIAL_SUCCESS" if failed_dates else "SUCCESS"
+            err_summary = "; ".join(failed_dates) if failed_dates else ""
 
-            # Record successful sync log in ClickHouse
+            # Record sync log in ClickHouse
             sync_log = SyncHistoryRecord(
                 sync_id=sync_id,
                 sync_type=sync_type,
-                status="SUCCESS",
+                status=sync_status,
                 records_fetched=total_fetched,
                 records_inserted=total_inserted,
                 duration_ms=duration_ms,
-                error_message="",
+                error_message=err_summary,
                 started_at=started_at,
                 completed_at=datetime.utcnow(),
             )
             await self.repository.save_sync_history(sync_log)
 
-            logger.info(f"[{sync_id}] ✓ Sync finished in {duration_ms}ms ({total_inserted} rows inserted/updated).")
+            logger.info(f"[{sync_id}] ✓ Sync finished with status {sync_status} in {duration_ms}ms ({total_inserted} rows inserted/updated).")
             return SyncResult(
                 success=True,
                 sync_id=str(sync_id),
                 records_fetched=total_fetched,
                 records_inserted=total_inserted,
                 duration_ms=duration_ms,
-                message=f"Successfully synchronized {total_inserted} records across target dates",
+                message=f"Successfully synchronized {total_inserted} records across target dates (status: {sync_status})",
+                error=err_summary or None,
             )
 
         except Exception as exc:

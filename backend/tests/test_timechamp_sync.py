@@ -145,3 +145,140 @@ async def test_pipeline_auto_catchup_detects_and_backfills_missing_dates():
     # Verify missing date (20-Oct-26) was fetched
     called_dates = [call.kwargs.get("target_date") for call in mock_client.get_tracking_summary_data.call_args_list]
     assert "20-Oct-26" in called_dates
+
+
+@pytest.mark.asyncio
+async def test_client_refreshes_token_on_403_and_retries(monkeypatch):
+    """Verify that receiving HTTP 403 causes TimeChampHttpApiClient to invalidate token, re-authenticate, and retry."""
+    from app.integrations.timechamp.client import TimeChampHttpApiClient
+    import httpx
+
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_token = AsyncMock(return_value="stale_token_123")
+    mock_token_manager.set_token = AsyncMock(return_value=None)
+    mock_token_manager.invalidate_token = AsyncMock(return_value=None)
+
+    client = TimeChampHttpApiClient(token_manager=mock_token_manager)
+    client.authenticate = AsyncMock(return_value="fresh_token_456")
+
+    attempt_count = 0
+
+    async def mock_get(url, headers=None, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        request = httpx.Request("GET", url, headers=headers)
+        if attempt_count == 1:
+            # First attempt receives 403 Forbidden from Timechamp
+            return httpx.Response(403, request=request, text='{"Message":"Forbidden"}')
+        else:
+            # Second attempt receives 200 OK with tracking data
+            return httpx.Response(
+                200,
+                request=request,
+                json={"success": True, "data": [{"empID": "W123", "timesheetDate": "16-Nov-26"}]}
+            )
+
+    class MockAsyncClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        async def get(self, url, headers=None, **kwargs):
+            return await mock_get(url, headers=headers, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: MockAsyncClient())
+
+    records = await client.get_tracking_summary_data(target_date="16-Nov-26")
+
+    assert len(records) == 1
+    assert records[0]["empID"] == "W123"
+    assert attempt_count == 2
+    mock_token_manager.invalidate_token.assert_called_once()
+    client.authenticate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_client_refreshes_token_on_401_and_retries(monkeypatch):
+    """Verify that receiving HTTP 401 causes TimeChampHttpApiClient to invalidate token, re-authenticate, and retry."""
+    from app.integrations.timechamp.client import TimeChampHttpApiClient
+    import httpx
+
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_token = AsyncMock(return_value="stale_token_123")
+    mock_token_manager.set_token = AsyncMock(return_value=None)
+    mock_token_manager.invalidate_token = AsyncMock(return_value=None)
+
+    client = TimeChampHttpApiClient(token_manager=mock_token_manager)
+    client.authenticate = AsyncMock(return_value="fresh_token_456")
+
+    attempt_count = 0
+
+    async def mock_get(url, headers=None, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        request = httpx.Request("GET", url, headers=headers)
+        if attempt_count == 1:
+            return httpx.Response(401, request=request, text='{"Message":"Authorization has been denied"}')
+        else:
+            return httpx.Response(
+                200,
+                request=request,
+                json={"success": True, "data": [{"empID": "W999", "timesheetDate": "17-Nov-26"}]}
+            )
+
+    class MockAsyncClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        async def get(self, url, headers=None, **kwargs):
+            return await mock_get(url, headers=headers, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: MockAsyncClient())
+
+    records = await client.get_tracking_summary_data(target_date="17-Nov-26")
+
+    assert len(records) == 1
+    assert records[0]["empID"] == "W999"
+    assert attempt_count == 2
+    mock_token_manager.invalidate_token.assert_called_once()
+    client.authenticate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_multi_date_resilience_partial_success():
+    """Verify that if one date fails, other dates still succeed and status is recorded as PARTIAL_SUCCESS."""
+    from app.integrations.timechamp.pipeline import TrackingSyncPipeline
+
+    mock_client = MagicMock()
+
+    async def mock_fetch(target_date=None):
+        if target_date == "16-Nov-26":
+            raise Exception("Simulated transient 500 error on 16-Nov-26")
+        return [{"empID": "W001", "username": "u@test.com", "timesheetDate": target_date, "totalTime": 100}]
+
+    mock_client.get_tracking_summary_data = AsyncMock(side_effect=mock_fetch)
+
+    mock_repo = MagicMock()
+    mock_repo.save_batch = AsyncMock(return_value=1)
+    mock_repo.save_sync_history = AsyncMock(return_value=None)
+
+    transformer = TrackingDataTransformer()
+    pipeline = TrackingSyncPipeline(
+        client=mock_client,
+        transformer=transformer,
+        repository=mock_repo,
+    )
+
+    result = await pipeline.run_sync(
+        sync_type="MULTI_DATE_TEST",
+        start_date="2026-11-16",
+        end_date="2026-11-17",
+    )
+
+    assert result.success is True
+    assert result.records_inserted == 1
+    # Verify save_sync_history was called with PARTIAL_SUCCESS
+    history_record = mock_repo.save_sync_history.call_args[0][0]
+    assert history_record.status == "PARTIAL_SUCCESS"
+    assert "16-Nov-26" in history_record.error_message

@@ -48,7 +48,7 @@ class RedisTokenManager(ITokenManager):
         # 2. In-memory fallback
         return self._memory_token
 
-    async def set_token(self, token: str, ttl_seconds: int = 43200) -> None:
+    async def set_token(self, token: str, ttl_seconds: int = 7200) -> None:
         self._memory_token = token
         try:
             r = await self._get_redis_conn()

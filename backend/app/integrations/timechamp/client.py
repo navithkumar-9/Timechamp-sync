@@ -59,7 +59,7 @@ class TimeChampHttpApiClient(ITimeChampClient):
                     await asyncio.sleep(2 ** attempt)
 
     async def get_tracking_summary_data(self, target_date: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Call GetTrackingSummaryData with automated token resolution and transparent 401 retry."""
+        """Call GetTrackingSummaryData with automated token resolution and transparent 401/403 retry."""
         token = await self.token_manager.get_token()
         if not token:
             token = await self.authenticate()
@@ -68,30 +68,55 @@ class TimeChampHttpApiClient(ITimeChampClient):
         if target_date:
             url += f"?date={target_date}"
 
-
         async with httpx.AsyncClient(limits=self._limits, timeout=self._timeout) as client:
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             }
 
-            for attempt in range(1, 3):
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
                 try:
                     response = await client.get(url, headers=headers)
 
-                    # Handle 401 Unauthorized transparently by refreshing token
-                    if response.status_code == 401:
-                        logger.warning("Received 401 from Timechamp API. Refreshing token and retrying...")
-                        await self.token_manager.invalidate_token()
-                        token = await self.authenticate()
-                        headers["Authorization"] = f"Bearer {token}"
-                        continue
+                    # Handle 401 Unauthorized or 403 Forbidden transparently by refreshing token
+                    if response.status_code in (401, 403):
+                        if attempt < max_attempts:
+                            logger.warning(
+                                f"Received HTTP {response.status_code} from Timechamp API (attempt {attempt}/{max_attempts}). "
+                                f"Invalidating cached token, re-authenticating and retrying..."
+                            )
+                            await self.token_manager.invalidate_token()
+                            token = await self.authenticate()
+                            headers["Authorization"] = f"Bearer {token}"
+                            await asyncio.sleep(1)
+                            continue
+                        else:
+                            await self.token_manager.invalidate_token()
+                            raise TimechampException(
+                                f"Timechamp API returned HTTP {response.status_code} after {attempt} attempts: {response.text[:200]}"
+                            )
 
                     response.raise_for_status()
                     result = response.json()
 
                     if not result.get("success"):
                         messages = result.get("apiResponseMessages") or "API reported failure"
+                        msg_str = str(messages).lower()
+                        # Handle potential auth or session expiration reported inside 200 OK body
+                        if any(kw in msg_str for kw in ("unauthorized", "token", "forbidden", "session", "expired", "denied")):
+                            if attempt < max_attempts:
+                                logger.warning(
+                                    f"Timechamp API reported auth failure in response body: {messages}. "
+                                    f"Invalidating token, re-authenticating and retrying..."
+                                )
+                                await self.token_manager.invalidate_token()
+                                token = await self.authenticate()
+                                headers["Authorization"] = f"Bearer {token}"
+                                await asyncio.sleep(1)
+                                continue
+                            else:
+                                await self.token_manager.invalidate_token()
                         raise TimechampException(f"GetTrackingSummaryData returned failure: {messages}")
 
                     records = result.get("data")
@@ -103,8 +128,8 @@ class TimeChampHttpApiClient(ITimeChampClient):
                     return []
 
                 except httpx.HTTPError as exc:
-                    logger.error(f"HTTP error fetching tracking summary (attempt {attempt}): {exc}")
-                    if attempt == 2:
+                    logger.error(f"HTTP error fetching tracking summary (attempt {attempt}/{max_attempts}): {exc}")
+                    if attempt == max_attempts:
                         raise TimechampException(f"Failed to fetch tracking summary: {str(exc)}")
                     await asyncio.sleep(2)
 
